@@ -309,6 +309,14 @@ struct Cli {
     /// Show I/O queue depth settings for all devices (or one DEVICE)
     #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
     queue_depth: Option<String>,
+
+    /// Watch for block device hotplug events (add/remove). Ctrl-C to exit.
+    #[arg(long)]
+    hotplug: bool,
+
+    /// ATA Secure Erase or NVMe format-nvm on DEVICE (DESTRUCTIVE — requires --yes)
+    #[arg(long, value_name = "DEVICE")]
+    secure_erase: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -475,6 +483,12 @@ fn main() -> Result<()> {
     if let Some(dev_or_all) = &cli.queue_depth {
         let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
         return run_queue_depth(dev);
+    }
+    if cli.hotplug {
+        return run_hotplug();
+    }
+    if let Some(dev) = &cli.secure_erase {
+        return run_secure_erase(dev, cli.yes);
     }
     if cli.config {
         return run_print_config();
@@ -4329,6 +4343,127 @@ fn run_queue_depth(device: Option<&str>) -> Result<()> {
                  nr_requests,
                  rot_str,
                  scheduler);
+    }
+    Ok(())
+}
+
+fn run_hotplug() -> Result<()> {
+    use std::collections::HashSet;
+
+    fn current_devices() -> HashSet<String> {
+        let mut set = HashSet::new();
+        if let Ok(rd) = std::fs::read_dir("/sys/block") {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.starts_with("loop") && !name.starts_with("ram") && !name.starts_with("zram") {
+                    set.insert(name);
+                }
+            }
+        }
+        set
+    }
+
+    let mut known = current_devices();
+    println!("Watching for block device hotplug events (Ctrl-C to exit)...");
+    println!("Current devices: {}", {
+        let mut v: Vec<&String> = known.iter().collect();
+        v.sort();
+        v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+    });
+    println!();
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let current = current_devices();
+
+        for added in current.difference(&known) {
+            let now = chrono::Local::now().format("%H:%M:%S");
+            // Try to get model from sysfs
+            let model = std::fs::read_to_string(format!("/sys/block/{}/device/model", added))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "?".to_string());
+            println!("[{}]  + ADDED   /dev/{}  ({})", now, added, model);
+        }
+
+        for removed in known.difference(&current) {
+            let now = chrono::Local::now().format("%H:%M:%S");
+            println!("[{}]  - REMOVED /dev/{}", now, removed);
+        }
+
+        known = current;
+    }
+}
+
+fn run_secure_erase(device: &str, confirmed: bool) -> Result<()> {
+    let name     = device.trim_start_matches("/dev/");
+    let dev_path = format!("/dev/{}", name);
+
+    // Detect device type
+    let blkid = std::process::Command::new("blkid")
+        .args(["-o", "value", "-s", "TYPE", &dev_path])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let is_nvme = name.starts_with("nvme");
+
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                  ⚠  SECURE ERASE WARNING  ⚠                 ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  Device  : {:<51}║", dev_path);
+    println!("║  FS type : {:<51}║", if blkid.is_empty() { "unknown".to_string() } else { blkid });
+    println!("║                                                              ║");
+    println!("║  This will PERMANENTLY DESTROY ALL DATA on this device.     ║");
+    println!("║  The operation cannot be undone.                            ║");
+    println!("║                                                              ║");
+    if is_nvme {
+        println!("║  Method: nvme format-nvm --ses=1 (cryptographic erase)      ║");
+    } else {
+        println!("║  Method: hdparm --security-erase (ATA Secure Erase)         ║");
+    }
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    if !confirmed {
+        println!("Re-run with --yes to confirm. Example:");
+        println!("  dtop --secure-erase {} --yes", dev_path);
+        println!();
+        println!("Aborted -- no changes made.");
+        return Ok(());
+    }
+
+    if is_nvme {
+        println!("Running: nvme format {} --ses=1 --force", dev_path);
+        let status = std::process::Command::new("nvme")
+            .args(["format", &dev_path, "--ses=1", "--force"])
+            .status()
+            .map_err(|e| anyhow::anyhow!("nvme CLI not found: {}\nInstall nvme-cli package.", e))?;
+        if status.success() {
+            println!("NVMe cryptographic erase completed.");
+        } else {
+            anyhow::bail!("nvme format exited with status {}", status);
+        }
+    } else {
+        // ATA Secure Erase via hdparm -- requires setting a password first then erasing
+        println!("Step 1: Setting security password...");
+        let pw_status = std::process::Command::new("hdparm")
+            .args(["--security-set-pass", "dtop_erase_pw", &dev_path])
+            .status()
+            .map_err(|e| anyhow::anyhow!("hdparm not found: {}\nInstall hdparm package.", e))?;
+        if !pw_status.success() {
+            anyhow::bail!("Failed to set ATA security password. Is the drive frozen? (Try power-cycle.)");
+        }
+
+        println!("Step 2: Running ATA Secure Erase...");
+        let erase_status = std::process::Command::new("hdparm")
+            .args(["--security-erase", "dtop_erase_pw", &dev_path])
+            .status()?;
+        if erase_status.success() {
+            println!("ATA Secure Erase completed.");
+        } else {
+            anyhow::bail!("hdparm --security-erase failed with status {}", erase_status);
+        }
     }
     Ok(())
 }

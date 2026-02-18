@@ -176,7 +176,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
 
     // ── Footer ─────────────────────────────────────────────────────
-    render_footer(f, root[2], &app.active_panel, app.layout_preset, &theme);
+    render_footer(f, root[2], &app.active_panel, app.layout_preset, &theme, &app.active_view, app.detail_open);
 }
 
 // ── Preset 0: Full 5-panel layout (default) ────────────────────────────

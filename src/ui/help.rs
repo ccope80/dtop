@@ -134,6 +134,8 @@ pub fn render(f: &mut Frame, theme: &Theme, scroll: usize) {
         key_line(theme, "  --write-barrier [DEV]", "Write barrier/FUA status per device"),
         key_line(theme, "  --sector-errors [DEV]", "Pending/reallocated sector counts"),
         key_line(theme, "  --queue-depth [DEV]",   "I/O queue depth per device"),
+        key_line(theme, "  --hotplug",             "Watch for device add/remove events"),
+        key_line(theme, "  --secure-erase DEV",    "Secure erase device (--yes required)"),
         key_line(theme, "  --print-service",     "Print systemd unit for daemon"),
         key_line(theme, "  --test-webhook",      "Send test webhook notification"),
         key_line(theme, "  --edit-config",       "Open config in $EDITOR"),

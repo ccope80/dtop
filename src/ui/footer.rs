@@ -1,4 +1,4 @@
-use crate::app::ActivePanel;
+use crate::app::{ActivePanel, ActiveView};
 use crate::ui::theme::Theme;
 use ratatui::{
     layout::Rect,
@@ -15,6 +15,8 @@ pub fn render_footer(
     panel: &ActivePanel,
     layout_preset: usize,
     theme: &Theme,
+    active_view: &ActiveView,
+    detail_open: bool,
 ) {
     let preset_label = PRESET_NAMES[layout_preset.min(2)];
     let base: &[(&str, &str)] = match panel {
@@ -62,6 +64,20 @@ pub fn render_footer(
             spans.push(Span::styled("Help  ", theme.footer_text));
         }
     }
+
+    // Context-sensitive hint line
+    let hint = match (active_view, detail_open) {
+        (ActiveView::AlertLog, _)           => "/ search  s filter  \u{2191}\u{2193} scroll  Esc back",
+        (ActiveView::ProcessIO, _)          => "s sort  \u{2191}\u{2193} navigate  Esc back",
+        (ActiveView::FilesystemOverview, _) => "\u{2191}\u{2193} scroll  g/G first/last  Esc back",
+        (ActiveView::VolumeManager, _)      => "\u{2191}\u{2193} scroll  Esc back",
+        (ActiveView::NfsView, _)            => "\u{2191}\u{2193} scroll  g/G first/last  Esc back",
+        (ActiveView::Dashboard, true)       => "w window  r SMART  B baseline  b bench  x test  D desc  Esc back",
+        (ActiveView::Dashboard, false)      => "f filter  s sort  p layout  a ack  Enter open  t theme  ? help",
+    };
+
+    spans.push(Span::styled("  \u{2502}  ", theme.footer_text));
+    spans.push(Span::styled(hint, theme.footer_text));
 
     let line = Line::from(spans);
     let para = Paragraph::new(line).style(theme.footer_bg);

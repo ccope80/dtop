@@ -14,12 +14,19 @@ pub fn render_alert_log_view(
     entries: &[(String, Alert)],  // newest first
     scroll: usize,
     filter: AlertLogFilter,
+    search: &str,
+    searching: bool,
     theme: &Theme,
 ) {
-    let filtered: Vec<&(String, Alert)> = entries.iter().filter(|(_, a)| match filter {
-        AlertLogFilter::All  => true,
-        AlertLogFilter::Crit => a.severity == Severity::Critical,
-        AlertLogFilter::Warn => a.severity == Severity::Warning,
+    let needle = search.to_lowercase();
+    let filtered: Vec<&(String, Alert)> = entries.iter().filter(|(_, a)| {
+        let sev_ok = match filter {
+            AlertLogFilter::All  => true,
+            AlertLogFilter::Crit => a.severity == Severity::Critical,
+            AlertLogFilter::Warn => a.severity == Severity::Warning,
+        };
+        let txt_ok = needle.is_empty() || a.message.to_lowercase().contains(&needle);
+        sev_ok && txt_ok
     }).collect();
 
     let filter_label = match filter {
@@ -29,9 +36,16 @@ pub fn render_alert_log_view(
     };
 
     let total = filtered.len();
+    let search_label = if searching {
+        format!("  [search: {}_]", search)
+    } else if !search.is_empty() {
+        format!("  [search: {}]", search)
+    } else {
+        String::new()
+    };
     let title = format!(
-        " F6 Alert Log — {} entries  [s: filter={}]  [Esc/F6 back] ",
-        total, filter_label
+        " F6 Alert Log — {} entries  [s: filter={}]{}  [/ search]  [Esc/F6 back] ",
+        total, filter_label, search_label
     );
 
     let block = Block::default()

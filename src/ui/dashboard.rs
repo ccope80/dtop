@@ -139,7 +139,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         app.device_list_area = Some(cols[0]);
         render_device_list(
             f, cols[0], &app.devices, &mut app.device_list_state,
-            app.active_panel == ActivePanel::Devices, app.device_filter.label(), app.device_sort.label(), &app.health_history, &app.device_io_history, &theme,
+            app.active_panel == ActivePanel::Devices, app.device_filter.label(), app.device_sort.label(), &app.health_history, &app.device_io_history, crit_count, warn_count, &theme,
         );
 
         if let Some(idx) = app.device_list_state.selected() {
@@ -184,10 +184,11 @@ fn render_preset_full(f: &mut Frame, body: ratatui::layout::Rect, app: &mut App,
         .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
         .split(rows[0]);
 
+    let (nc, nw) = alert_badge_counts(app);
     app.device_list_area = Some(top[0]);
     render_device_list(
         f, top[0], &app.devices, &mut app.device_list_state,
-        app.active_panel == ActivePanel::Devices, app.device_filter.label(), app.device_sort.label(), &app.health_history, &app.device_io_history, theme,
+        app.active_panel == ActivePanel::Devices, app.device_filter.label(), app.device_sort.label(), &app.health_history, &app.device_io_history, nc, nw, theme,
     );
     render_throughput(
         f, top[1], &app.devices,
@@ -227,10 +228,11 @@ fn render_preset_io_focus(f: &mut Frame, body: ratatui::layout::Rect, app: &mut 
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(rows[0]);
 
+    let (nc, nw) = alert_badge_counts(app);
     app.device_list_area = Some(top[0]);
     render_device_list(
         f, top[0], &app.devices, &mut app.device_list_state,
-        app.active_panel == ActivePanel::Devices, app.device_filter.label(), app.device_sort.label(), &app.health_history, &app.device_io_history, theme,
+        app.active_panel == ActivePanel::Devices, app.device_filter.label(), app.device_sort.label(), &app.health_history, &app.device_io_history, nc, nw, theme,
     );
     render_throughput(
         f, top[1], &app.devices,
@@ -243,6 +245,16 @@ fn render_preset_io_focus(f: &mut Frame, body: ratatui::layout::Rect, app: &mut 
     );
 }
 
+fn alert_badge_counts(app: &App) -> (usize, usize) {
+    let nc = app.alerts.iter()
+        .filter(|a| a.severity == crate::alerts::Severity::Critical && !app.acked_alerts.contains(&a.key()))
+        .count();
+    let nw = app.alerts.iter()
+        .filter(|a| a.severity == crate::alerts::Severity::Warning && !app.acked_alerts.contains(&a.key()))
+        .count();
+    (nc, nw)
+}
+
 // ── Preset 2: Storage — devices left, full filesystem right ──────────────
 
 fn render_preset_storage(f: &mut Frame, body: ratatui::layout::Rect, app: &mut App, theme: &crate::ui::theme::Theme) {
@@ -251,10 +263,11 @@ fn render_preset_storage(f: &mut Frame, body: ratatui::layout::Rect, app: &mut A
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(body);
 
+    let (nc, nw) = alert_badge_counts(app);
     app.device_list_area = Some(cols[0]);
     render_device_list(
         f, cols[0], &app.devices, &mut app.device_list_state,
-        app.active_panel == ActivePanel::Devices, app.device_filter.label(), app.device_sort.label(), &app.health_history, &app.device_io_history, theme,
+        app.active_panel == ActivePanel::Devices, app.device_filter.label(), app.device_sort.label(), &app.health_history, &app.device_io_history, nc, nw, theme,
     );
     render_filesystem_bars(
         f, cols[1], &app.filesystems, app.fs_scroll,
@@ -270,10 +283,11 @@ fn render_compact(f: &mut Frame, body: ratatui::layout::Rect, app: &mut App, the
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(body);
 
+    let (nc, nw) = alert_badge_counts(app);
     app.device_list_area = Some(rows[0]);
     render_device_list(
         f, rows[0], &app.devices, &mut app.device_list_state,
-        app.active_panel == ActivePanel::Devices, app.device_filter.label(), app.device_sort.label(), &app.health_history, &app.device_io_history, theme,
+        app.active_panel == ActivePanel::Devices, app.device_filter.label(), app.device_sort.label(), &app.health_history, &app.device_io_history, nc, nw, theme,
     );
     render_filesystem_bars(
         f, rows[1], &app.filesystems, app.fs_scroll,

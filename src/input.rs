@@ -31,6 +31,7 @@ pub enum Action {
     ShowConfig,    // C: open config viewer overlay
     JumpTop,       // g: jump to first device / row
     JumpBottom,    // G: jump to last device / row
+    AlertSearch,   // /: open text search in alert log
     None,
 }
 
@@ -79,6 +80,9 @@ pub fn handle_key(key: KeyEvent) -> Action {
         (KeyCode::Char('B'), _) => Action::SaveBaseline,
         (KeyCode::Char('D'), _) => Action::ToggleDesc,
         (KeyCode::Char('C'), _) => Action::ShowConfig,
+
+        // Alert log search
+        (KeyCode::Char('/'), _) => Action::AlertSearch,
 
         // Jump to first / last
         (KeyCode::Char('g'), _) => Action::JumpTop,

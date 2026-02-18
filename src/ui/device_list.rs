@@ -32,6 +32,8 @@ pub fn render_device_list(
     sort_label: &str,
     health_history: &HashMap<String, Vec<u8>>,
     io_history: &HashMap<String, (RingBuffer, RingBuffer)>,
+    n_crit: usize,
+    n_warn: usize,
     theme: &Theme,
 ) {
     let border_style = if focused { theme.border_focused } else { theme.border };
@@ -58,6 +60,17 @@ pub fn render_device_list(
     }
     if sort_label != "Natural" {
         title = format!("{}  [s:{}]", title, sort_label);
+    }
+
+    // Append alert badge to title when there are unacknowledged alerts
+    let badge = match (n_crit, n_warn) {
+        (0, 0) => String::new(),
+        (c, 0) => format!("  ▲{}crit", c),
+        (0, w) => format!("  ▲{}warn", w),
+        (c, w) => format!("  ▲{}crit ▲{}warn", c, w),
+    };
+    if !badge.is_empty() {
+        title = format!("{}{}", title, badge);
     }
 
     let block = Block::default()

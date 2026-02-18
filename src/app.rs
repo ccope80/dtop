@@ -14,7 +14,7 @@ use crate::ui::theme::{Theme, ThemeVariant};
 use crate::ui::{dashboard, filesystem_view, help, nfs_view, process_view, volume_view};
 use crate::util::ring_buffer::RingBuffer;
 use anyhow::Result;
-use crossterm::event::{self, Event, MouseButton, MouseEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::widgets::{ListState, TableState};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -155,7 +155,8 @@ pub struct App {
     pub layout_preset: usize,
 
     // Help overlay
-    pub show_help: bool,
+    pub show_help:   bool,
+    pub help_scroll: usize,
 
     // Device list filter (f key) and sort (s key)
     pub device_filter: DeviceFilter,
@@ -250,9 +251,11 @@ pub struct App {
     pub write_endurance: write_endurance::EnduranceMap,
 
     // Alert log viewer state (F6)
-    pub alert_log_entries: Vec<(String, crate::alerts::Alert)>,
-    pub alert_log_scroll:  usize,
-    pub alert_log_filter:  AlertLogFilter,
+    pub alert_log_entries:   Vec<(String, crate::alerts::Alert)>,
+    pub alert_log_scroll:    usize,
+    pub alert_log_filter:    AlertLogFilter,
+    pub alert_log_search:    String,
+    pub alert_log_searching: bool,
 
     // Config overlay (C key)
     pub show_config: bool,
@@ -300,6 +303,7 @@ impl App {
             active_panel:  ActivePanel::Devices,
             layout_preset: saved.layout_preset.min(2),
             show_help:     false,
+            help_scroll:   0,
             device_filter: DeviceFilter::All,
             device_sort:   DeviceSort::Natural,
             fast_tick:     Duration::from_millis(interval_ms.max(500)),
@@ -345,9 +349,11 @@ impl App {
             smart_baselines:   HashMap::new(),
             health_history:    health_history::load(),
             write_endurance:   write_endurance::load(),
-            alert_log_entries: Vec::new(),
-            alert_log_scroll:  0,
-            alert_log_filter:  AlertLogFilter::All,
+            alert_log_entries:   Vec::new(),
+            alert_log_scroll:    0,
+            alert_log_filter:    AlertLogFilter::All,
+            alert_log_search:    String::new(),
+            alert_log_searching: false,
             show_config:         false,
             config_reload_flash: None,
             detail_show_desc:    false,
@@ -423,12 +429,14 @@ impl App {
                             &self.alert_log_entries,
                             self.alert_log_scroll,
                             self.alert_log_filter,
+                            &self.alert_log_search,
+                            self.alert_log_searching,
                             &theme_snap,
                         );
                     }
                 }
                 if show_help {
-                    help::render(f, &theme_snap);
+                    help::render(f, &theme_snap, self.help_scroll);
                 }
                 if show_config {
                     use crate::ui::config_overlay::render_config_overlay;
@@ -442,8 +450,12 @@ impl App {
             if event::poll(POLL_TIMEOUT)? {
                 match event::read()? {
                     Event::Key(key) => {
-                        let action = handle_key(key);
-                        self.handle_action(action);
+                        if self.alert_log_searching {
+                            self.handle_search_key(key);
+                        } else {
+                            let action = handle_key(key);
+                            self.handle_action(action);
+                        }
                     }
                     Event::Mouse(me) => match me.kind {
                         MouseEventKind::ScrollDown => self.handle_action(Action::ScrollDown),
@@ -547,6 +559,12 @@ impl App {
             match action {
                 Action::Quit     => self.should_quit = true,
                 Action::ShowHelp | Action::Back => { self.show_help = false; }
+                Action::SelectUp   | Action::ScrollUp   => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                }
+                Action::SelectDown | Action::ScrollDown => {
+                    self.help_scroll += 1;
+                }
                 _ => {}
             }
             return;
@@ -564,7 +582,7 @@ impl App {
         match action {
             Action::Quit => self.should_quit = true,
 
-            Action::ShowHelp => { self.show_help = true; }
+            Action::ShowHelp => { self.show_help = true; self.help_scroll = 0; }
 
             Action::ShowConfig => { self.show_config = !self.show_config; }
 
@@ -629,11 +647,21 @@ impl App {
             Action::ViewAlertLog => {
                 if self.active_view == ActiveView::AlertLog {
                     self.active_view = ActiveView::Dashboard;
+                    self.alert_log_searching = false;
+                    self.alert_log_search.clear();
                 } else {
-                    self.active_view    = ActiveView::AlertLog;
-                    self.alert_log_entries = alert_log::load_all();
-                    self.alert_log_scroll  = 0;
-                    self.alert_log_filter  = AlertLogFilter::All;
+                    self.active_view         = ActiveView::AlertLog;
+                    self.alert_log_entries   = alert_log::load_all();
+                    self.alert_log_scroll    = 0;
+                    self.alert_log_filter    = AlertLogFilter::All;
+                    self.alert_log_searching = false;
+                    self.alert_log_search.clear();
+                }
+            }
+
+            Action::AlertSearch => {
+                if self.active_view == ActiveView::AlertLog {
+                    self.alert_log_searching = true;
                 }
             }
 
@@ -670,6 +698,8 @@ impl App {
                     self.bench_state = BenchmarkState::Idle;
                 } else if self.active_view == ActiveView::AlertLog {
                     self.active_view = ActiveView::Dashboard;
+                    self.alert_log_searching = false;
+                    self.alert_log_search.clear();
                 } else if self.active_view != ActiveView::Dashboard {
                     self.active_view = ActiveView::Dashboard;
                 } else {
@@ -844,6 +874,30 @@ impl App {
             }
 
             Action::None => {}
+        }
+    }
+
+    // ── Alert log search input ────────────────────────────────────────
+
+    fn handle_search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.alert_log_searching = false;
+                self.alert_log_search.clear();
+                self.alert_log_scroll = 0;
+            }
+            KeyCode::Enter => {
+                self.alert_log_searching = false;
+            }
+            KeyCode::Backspace => {
+                self.alert_log_search.pop();
+                self.alert_log_scroll = 0;
+            }
+            KeyCode::Char(c) => {
+                self.alert_log_search.push(c);
+                self.alert_log_scroll = 0;
+            }
+            _ => {}
         }
     }
 

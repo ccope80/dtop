@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-pub fn render(f: &mut Frame, theme: &Theme) {
+pub fn render(f: &mut Frame, theme: &Theme, scroll: usize) {
     let area = centered_rect(70, 34, f.area());
     f.render_widget(Clear, area);
 
@@ -129,8 +129,9 @@ pub fn render(f: &mut Frame, theme: &Theme) {
         key_line(theme, "  Acks/logs  ~/.local/share/dtop/", ""),
     ];
 
-    f.render_widget(Paragraph::new(left), cols[0]);
-    f.render_widget(Paragraph::new(right), cols[1]);
+    let s = scroll as u16;
+    f.render_widget(Paragraph::new(left).scroll((s, 0)), cols[0]);
+    f.render_widget(Paragraph::new(right).scroll((s, 0)), cols[1]);
 }
 
 fn key_line<'a>(theme: &Theme, key: &'a str, desc: &'a str) -> Line<'a> {

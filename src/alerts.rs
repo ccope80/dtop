@@ -1,3 +1,4 @@
+use crate::config::AlertThresholds;
 use crate::models::device::BlockDevice;
 use crate::models::filesystem::Filesystem;
 use crate::models::smart::SmartStatus;
@@ -37,7 +38,7 @@ impl Alert {
 
 /// Evaluate all alert conditions against current state.
 /// Returns a freshly built list sorted Critical → Warning → Info.
-pub fn evaluate(devices: &[BlockDevice], filesystems: &[Filesystem]) -> Vec<Alert> {
+pub fn evaluate(devices: &[BlockDevice], filesystems: &[Filesystem], thr: &AlertThresholds) -> Vec<Alert> {
     let mut alerts: Vec<Alert> = Vec::new();
 
     for dev in devices {
@@ -53,9 +54,13 @@ pub fn evaluate(devices: &[BlockDevice], filesystems: &[Filesystem]) -> Vec<Aler
                 });
             }
 
-            // Temperature thresholds (SSD/NVMe: 55/70°C  HDD: 50/60°C)
+            // Temperature thresholds (config-driven)
             if let Some(temp) = smart.temperature {
-                let (warn, crit) = if dev.rotational { (50, 60) } else { (55, 70) };
+                let (warn, crit) = if dev.rotational {
+                    (thr.temperature_warn_hdd, thr.temperature_crit_hdd)
+                } else {
+                    (thr.temperature_warn_ssd, thr.temperature_crit_ssd)
+                };
                 if temp >= crit {
                     alerts.push(Alert {
                         severity: Severity::Critical,
@@ -170,7 +175,7 @@ pub fn evaluate(devices: &[BlockDevice], filesystems: &[Filesystem]) -> Vec<Aler
         }
 
         // ── I/O utilisation sustained ─────────────────────────────────
-        if dev.io_util_pct >= 95.0 {
+        if dev.io_util_pct >= thr.io_util_warn_pct {
             alerts.push(Alert {
                 severity: Severity::Warning,
                 device:   Some(dev.name.clone()),
@@ -178,19 +183,37 @@ pub fn evaluate(devices: &[BlockDevice], filesystems: &[Filesystem]) -> Vec<Aler
                 message:  format!("I/O utilisation {:.0}% (sustained)", dev.io_util_pct),
             });
         }
+
+        // ── I/O latency ───────────────────────────────────────────────
+        let lat = dev.avg_read_latency_ms.max(dev.avg_write_latency_ms);
+        if thr.latency_crit_ms > 0.0 && lat >= thr.latency_crit_ms {
+            alerts.push(Alert {
+                severity: Severity::Critical,
+                device:   Some(dev.name.clone()),
+                mount:    None,
+                message:  format!("I/O latency {:.0}ms ≥ critical threshold {:.0}ms", lat, thr.latency_crit_ms),
+            });
+        } else if thr.latency_warn_ms > 0.0 && lat >= thr.latency_warn_ms {
+            alerts.push(Alert {
+                severity: Severity::Warning,
+                device:   Some(dev.name.clone()),
+                mount:    None,
+                message:  format!("I/O latency {:.0}ms ≥ warning threshold {:.0}ms", lat, thr.latency_warn_ms),
+            });
+        }
     }
 
     // ── Filesystem thresholds ─────────────────────────────────────────
     for fs in filesystems {
         let pct = fs.use_pct();
-        if pct >= 95.0 {
+        if pct >= thr.filesystem_crit_pct {
             alerts.push(Alert {
                 severity: Severity::Critical,
                 device:   None,
                 mount:    Some(fs.mount.clone()),
                 message:  format!("{:.0}% full — critically low space", pct),
             });
-        } else if pct >= 85.0 {
+        } else if pct >= thr.filesystem_warn_pct {
             alerts.push(Alert {
                 severity: Severity::Warning,
                 device:   None,
@@ -200,14 +223,14 @@ pub fn evaluate(devices: &[BlockDevice], filesystems: &[Filesystem]) -> Vec<Aler
         }
 
         let ipct = fs.inode_pct();
-        if ipct >= 95.0 {
+        if ipct >= thr.inode_crit_pct {
             alerts.push(Alert {
                 severity: Severity::Critical,
                 device:   None,
                 mount:    Some(fs.mount.clone()),
                 message:  format!("Inodes {:.0}% used — critically low", ipct),
             });
-        } else if ipct >= 85.0 {
+        } else if ipct >= thr.inode_warn_pct {
             alerts.push(Alert {
                 severity: Severity::Warning,
                 device:   None,

@@ -1,4 +1,6 @@
-#[derive(Debug, Clone, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SmartStatus {
     Unknown,
     Passed,
@@ -18,7 +20,7 @@ impl SmartStatus {
 }
 
 /// One ATA SMART attribute row.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartAttribute {
     pub id:          u32,
     pub name:        String,
@@ -39,7 +41,7 @@ impl SmartAttribute {
 }
 
 /// NVMe SMART / Health Information Log.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NvmeHealth {
     pub critical_warning:           u8,
     pub temperature_celsius:        i32,
@@ -61,7 +63,7 @@ impl NvmeHealth {
 }
 
 /// Complete SMART snapshot for one device.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartData {
     pub status:         SmartStatus,
     pub temperature:    Option<i32>,

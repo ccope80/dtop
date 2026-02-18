@@ -1,5 +1,6 @@
 use crate::alerts::{self, Alert};
-use crate::collectors::{diskstats, filesystem, lsblk, lvm, mdraid, nfs, process_io, smart as smart_collector, zfs};
+use crate::collectors::{diskstats, filesystem, lsblk, lvm, mdraid, nfs, process_io, smart as smart_collector, smart_cache, zfs};
+use crate::util::{alert_log, webhook};
 use crate::config::Config;
 use crate::input::{handle_key, Action};
 use crate::models::device::BlockDevice;
@@ -177,6 +178,18 @@ impl App {
 
         app.collect_slow()?;
         app.collect_fast()?;
+
+        // Seed SMART data from disk cache so health status is shown immediately
+        let cache = smart_cache::load();
+        for dev in &mut app.devices {
+            if let Some(cached) = cache.get(&dev.name) {
+                dev.smart = Some(cached.clone());
+                if let Some(t) = cached.temperature {
+                    dev.temp_history.push(t as u64);
+                }
+            }
+        }
+
         app.schedule_all_smart();
 
         if !app.devices.is_empty() {
@@ -235,7 +248,10 @@ impl App {
                 let prev_alerts = self.alerts.clone();
                 self.collect_fast()?;
                 self.last_fast_tick = Instant::now();
-                let new_alerts = alerts::evaluate(&self.devices, &self.filesystems);
+                let new_alerts = alerts::evaluate(
+                    &self.devices, &self.filesystems,
+                    &self.config.alerts.thresholds,
+                );
                 self.update_alert_history(&prev_alerts, &new_alerts);
                 self.alerts = new_alerts;
             }
@@ -257,6 +273,8 @@ impl App {
 
     fn update_alert_history(&mut self, prev: &[Alert], new: &[Alert]) {
         let now = chrono::Local::now().format("%H:%M:%S").to_string();
+        let mut fresh: Vec<Alert> = Vec::new();
+
         for alert in new {
             let key = format!("{}{}{}", alert.severity.label(), alert.prefix(), alert.message);
             let was_present = prev.iter().any(|a| {
@@ -267,6 +285,18 @@ impl App {
                     self.alert_history.pop_back();
                 }
                 self.alert_history.push_front((now.clone(), alert.clone()));
+                fresh.push(alert.clone());
+            }
+        }
+
+        if !fresh.is_empty() {
+            alert_log::append(&fresh);
+            if !self.config.notifications.webhook_url.is_empty() {
+                webhook::notify(
+                    &fresh,
+                    &self.config.notifications.webhook_url.clone(),
+                    self.config.notifications.notify_warning,
+                );
             }
         }
     }
@@ -602,14 +632,26 @@ impl App {
     }
 
     fn consume_smart_results(&mut self) {
+        let mut cache_dirty = false;
         while let Ok(result) = self.smart_rx.try_recv() {
             self.smart_pending.remove(&result.device_name);
             if let Some(dev) = self.devices.iter_mut().find(|d| d.name == result.device_name) {
-                // Save current as "previous" for delta tracking
                 dev.smart_prev      = dev.smart.clone();
                 dev.smart           = result.data;
                 dev.smart_polled_at = Some(Instant::now());
+                // Push temperature into history
+                if let Some(t) = dev.temperature() {
+                    dev.temp_history.push(t as u64);
+                }
+                cache_dirty = true;
             }
+        }
+        // Persist SMART cache after any updates
+        if cache_dirty {
+            let cache: smart_cache::SmartCache = self.devices.iter()
+                .filter_map(|d| d.smart.as_ref().map(|s| (d.name.clone(), s.clone())))
+                .collect();
+            smart_cache::save(&cache);
         }
     }
 

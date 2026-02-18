@@ -13,6 +13,9 @@ pub struct Config {
 
     #[serde(default)]
     pub devices: DevicesConfig,
+
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +43,10 @@ pub struct AlertThresholds {
     pub temperature_warn_hdd: i32,
     pub temperature_crit_hdd: i32,
     pub io_util_warn_pct:     f64,
+    /// Average read latency warning threshold (ms). 0 = disabled.
+    pub latency_warn_ms:      f64,
+    /// Average read latency critical threshold (ms). 0 = disabled.
+    pub latency_crit_ms:      f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,14 +55,25 @@ pub struct DevicesConfig {
     pub exclude: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationsConfig {
+    /// Slack / Discord / generic webhook URL for alert POSTs. Empty = disabled.
+    pub webhook_url: String,
+    /// Fire webhook for new Critical-severity alerts.
+    pub notify_critical: bool,
+    /// Fire webhook for new Warning-severity alerts.
+    pub notify_warning: bool,
+}
+
 // ── Defaults ─────────────────────────────────────────────────────────
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            general: GeneralConfig::default(),
-            alerts:  AlertConfig::default(),
-            devices: DevicesConfig::default(),
+            general:       GeneralConfig::default(),
+            alerts:        AlertConfig::default(),
+            devices:       DevicesConfig::default(),
+            notifications: NotificationsConfig::default(),
         }
     }
 }
@@ -84,6 +102,18 @@ impl Default for AlertThresholds {
             temperature_warn_hdd: 50,
             temperature_crit_hdd: 60,
             io_util_warn_pct:     95.0,
+            latency_warn_ms:      50.0,
+            latency_crit_ms:      200.0,
+        }
+    }
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            webhook_url:      String::new(),
+            notify_critical:  true,
+            notify_warning:   false,
         }
     }
 }

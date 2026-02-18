@@ -44,7 +44,7 @@ pub fn render_detail(
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),   // sparklines + latency
+            Constraint::Length(9),   // sparklines + temp sparkline + latency
             Constraint::Min(4),      // scrollable info
         ])
         .split(inner);
@@ -62,7 +62,9 @@ fn render_sparklines(f: &mut Frame, area: Rect, device: &BlockDevice, history_wi
             Constraint::Length(1),  // read sparkline
             Constraint::Length(1),  // write label
             Constraint::Length(1),  // write sparkline
-            Constraint::Length(1),  // latency line
+            Constraint::Length(1),  // temp label
+            Constraint::Length(1),  // temp sparkline
+            Constraint::Length(1),  // latency + util line
             Constraint::Min(0),
         ])
         .split(area);
@@ -100,6 +102,31 @@ fn render_sparklines(f: &mut Frame, area: Rect, device: &BlockDevice, history_wi
         rows[3],
     );
 
+    // Temperature label + sparkline
+    let temp_data = device.temp_history.last_n(samples);
+    let temp_max  = temp_data.iter().copied().max().unwrap_or(1).max(1);
+    let temp_str  = match device.temperature() {
+        Some(t) => format!("{}°C", t),
+        None    => "N/A".to_string(),
+    };
+    let temp_style = match device.temperature() {
+        Some(t) if (device.rotational && t >= 60) || (!device.rotational && t >= 70) => theme.crit,
+        Some(t) if (device.rotational && t >= 50) || (!device.rotational && t >= 55) => theme.warn,
+        Some(_) => theme.ok,
+        None    => theme.text_dim,
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Temp  ", theme.text_dim),
+            Span::styled(temp_str, temp_style),
+        ])),
+        rows[4],
+    );
+    f.render_widget(
+        Sparkline::default().data(&temp_data).max(temp_max).style(temp_style),
+        rows[5],
+    );
+
     // Latency + util row
     let r_lat = device.avg_read_latency_ms;
     let w_lat = device.avg_write_latency_ms;
@@ -112,7 +139,7 @@ fn render_sparklines(f: &mut Frame, area: Rect, device: &BlockDevice, history_wi
         Span::styled("   Util:", theme.text_dim),
         Span::styled(fmt_pct(device.io_util_pct), theme.util_style(device.io_util_pct)),
     ]);
-    f.render_widget(Paragraph::new(lat_line), rows[4]);
+    f.render_widget(Paragraph::new(lat_line), rows[6]);
 }
 
 fn fmt_latency(ms: f64) -> String {

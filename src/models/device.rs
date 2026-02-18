@@ -60,6 +60,8 @@ pub struct BlockDevice {
     // Latency history (µs*10 stored as u64 for sparkline, to preserve sub-ms detail)
     pub read_lat_history:  RingBuffer,
     pub write_lat_history: RingBuffer,
+    // Temperature history (°C, sampled each SMART poll cycle)
+    pub temp_history:      RingBuffer,
 
     // SMART (updated on slow poll / on-demand)
     pub smart:           Option<SmartData>,
@@ -90,6 +92,7 @@ impl BlockDevice {
             util_history:      RingBuffer::new(1800),
             read_lat_history:  RingBuffer::new(1800),
             write_lat_history: RingBuffer::new(1800),
+            temp_history:      RingBuffer::new(1800),
             smart:           None,
             smart_prev:      None,
             smart_polled_at: None,

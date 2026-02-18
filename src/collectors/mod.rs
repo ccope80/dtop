@@ -6,4 +6,5 @@ pub mod mdraid;
 pub mod nfs;
 pub mod process_io;
 pub mod smart;
+pub mod smart_cache;
 pub mod zfs;

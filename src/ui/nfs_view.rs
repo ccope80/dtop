@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::collectors::nfs::NfsMountStats;
 use crate::util::human::fmt_bytes;
+use crate::util::ring_buffer::RingBuffer;
 use chrono::Local;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -9,6 +10,34 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table},
     Frame,
 };
+use std::collections::HashMap;
+
+const SPARKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// Build a 5-char sparkline + RTT label for a single RTT series.
+fn rtt_cell(rtt_ms: f64, history: Option<&RingBuffer>) -> String {
+    let spark: String = match history {
+        None => "     ".to_string(),
+        Some(rb) => {
+            let samples = rb.last_n(5);
+            if samples.is_empty() {
+                "     ".to_string()
+            } else {
+                let max = samples.iter().copied().max().unwrap_or(1).max(1);
+                samples.iter().map(|&v| {
+                    SPARKS[((v * 7) / max).min(7) as usize]
+                }).collect()
+            }
+        }
+    };
+    if rtt_ms == 0.0 {
+        format!("{} —    ", spark)
+    } else if rtt_ms < 10.0 {
+        format!("{} {:.1}ms", spark, rtt_ms)
+    } else {
+        format!("{} {:.0}ms ", spark, rtt_ms)
+    }
+}
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area  = f.area();
@@ -48,7 +77,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             .constraints([Constraint::Min(0)])
             .split(body);
 
-        render_nfs_table(f, rows_area[0], &app.nfs_mounts, &theme);
+        render_nfs_table(f, rows_area[0], &app.nfs_mounts, &app.nfs_rtt_history, &theme);
     }
 
     // Footer
@@ -64,7 +93,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
     );
 }
 
-fn render_nfs_table(f: &mut Frame, area: ratatui::layout::Rect, mounts: &[NfsMountStats], theme: &crate::ui::theme::Theme) {
+fn render_nfs_table(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    mounts: &[NfsMountStats],
+    rtt_history: &HashMap<String, (RingBuffer, RingBuffer)>,
+    theme: &crate::ui::theme::Theme,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.border_focused)
@@ -80,8 +115,8 @@ fn render_nfs_table(f: &mut Frame, area: ratatui::layout::Rect, mounts: &[NfsMou
         Cell::from("Type").style(theme.text_dim),
         Cell::from("Server").style(theme.text_dim),
         Cell::from("Age").style(theme.text_dim),
-        Cell::from("R-RTT").style(theme.text_dim),
-        Cell::from("W-RTT").style(theme.text_dim),
+        Cell::from("R-Hist  RTT").style(theme.text_dim),
+        Cell::from("W-Hist  RTT").style(theme.text_dim),
         Cell::from("Status").style(theme.text_dim),
         Cell::from("Read").style(theme.text_dim),
         Cell::from("Written").style(theme.text_dim),
@@ -110,13 +145,14 @@ fn render_nfs_table(f: &mut Frame, area: ratatui::layout::Rect, mounts: &[NfsMou
             m.device.clone()
         };
 
+        let hist = rtt_history.get(&m.mount);
         Row::new(vec![
             Cell::from(m.mount.clone()).style(theme.text),
             Cell::from(m.fstype.clone()).style(theme.text_dim),
             Cell::from(server).style(theme.text_dim),
             Cell::from(age_str).style(theme.text_dim),
-            Cell::from(m.read_latency_label()).style(rtt_style(m.read_rtt_ms, theme)),
-            Cell::from(m.write_latency_label()).style(rtt_style(m.write_rtt_ms, theme)),
+            Cell::from(rtt_cell(m.read_rtt_ms,  hist.map(|p| &p.0))).style(rtt_style(m.read_rtt_ms, theme)),
+            Cell::from(rtt_cell(m.write_rtt_ms, hist.map(|p| &p.1))).style(rtt_style(m.write_rtt_ms, theme)),
             Cell::from(status).style(status_style),
             Cell::from(fmt_bytes(m.server_bytes_read)).style(theme.read_spark),
             Cell::from(fmt_bytes(m.server_bytes_written)).style(theme.write_spark),
@@ -124,12 +160,12 @@ fn render_nfs_table(f: &mut Frame, area: ratatui::layout::Rect, mounts: &[NfsMou
     }).collect();
 
     let widths = [
+        Constraint::Min(16),
+        Constraint::Length(6),
         Constraint::Min(18),
-        Constraint::Length(6),
-        Constraint::Min(20),
-        Constraint::Length(6),
-        Constraint::Length(8),
-        Constraint::Length(8),
+        Constraint::Length(5),
+        Constraint::Length(14),
+        Constraint::Length(14),
         Constraint::Length(9),
         Constraint::Length(10),
         Constraint::Length(10),

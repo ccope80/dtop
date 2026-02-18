@@ -61,13 +61,20 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let now   = Local::now().format("%H:%M:%S").to_string();
     let left  = format!(" DTop v0.1 — {} ", app.theme_variant.name());
     let right = format!(" {} ", now);
-    let pad   = (area.width as usize)
-        .saturating_sub(left.len() + alert_badge.len() + right.len());
+
+    let reload_flash = match app.config_reload_flash {
+        Some(t) if t.elapsed() < std::time::Duration::from_secs(3) => "  ↺ Config reloaded  ",
+        _ => "",
+    };
+
+    let pad = (area.width as usize)
+        .saturating_sub(left.len() + alert_badge.len() + reload_flash.len() + right.len());
 
     let header_line1 = Line::from(vec![
         Span::styled(left, theme.title),
         Span::styled(alert_badge, alert_style),
         Span::styled(" ".repeat(pad), theme.header),
+        Span::styled(reload_flash, theme.ok),
         Span::styled(right, theme.text_dim),
     ]);
 

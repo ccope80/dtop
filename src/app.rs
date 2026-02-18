@@ -1,6 +1,6 @@
 use crate::alerts::{self, Alert};
 use crate::collectors::{diskstats, filesystem, lsblk, lvm, mdraid, nfs, process_io, smart as smart_collector, smart_cache, zfs};
-use crate::util::{alert_log, health_history, smart_anomaly, smart_baseline, webhook, write_endurance};
+use crate::util::{alert_log, health_history, smart_anomaly, smart_baseline, user_state, webhook, write_endurance};
 use crate::config::Config;
 use crate::ui::benchmark_popup;
 use crate::input::{handle_key, Action};
@@ -256,8 +256,14 @@ pub struct App {
     // Config overlay (C key)
     pub show_config: bool,
 
+    // Flash timestamp set when config hot-reloads; cleared after 3s display
+    pub config_reload_flash: Option<Instant>,
+
     // Detail view: show SMART attribute descriptions (D key)
     pub detail_show_desc: bool,
+
+    // NFS RTT history: mount → (read_rtt × 10 as u64, write_rtt × 10 as u64)
+    pub nfs_rtt_history: HashMap<String, (RingBuffer, RingBuffer)>,
 
     // Filesystem usage history for fill-rate computation: mount → [(Instant, used_bytes)]
     fs_usage_history: HashMap<String, VecDeque<(Instant, u64)>>,
@@ -271,13 +277,21 @@ impl App {
         let (bench_tx, bench_rx) = mpsc::channel();
         let config = Config::load();
 
+        // Restore saved UI state (theme + layout), honoring explicit CLI --theme override.
+        let saved = user_state::UserState::load();
+        let theme_variant = if initial_theme == ThemeVariant::Default && !saved.theme_name.is_empty() {
+            ThemeVariant::from_name(&saved.theme_name)
+        } else {
+            initial_theme
+        };
+
         let mut app = Self {
             config,
-            theme:         Theme::for_variant(initial_theme),
-            theme_variant: initial_theme,
+            theme:         Theme::for_variant(theme_variant),
+            theme_variant,
             active_view:   ActiveView::Dashboard,
             active_panel:  ActivePanel::Devices,
-            layout_preset: 0,
+            layout_preset: saved.layout_preset.min(2),
             show_help:     false,
             device_filter: DeviceFilter::All,
             device_sort:   DeviceSort::Natural,
@@ -327,9 +341,11 @@ impl App {
             alert_log_entries: Vec::new(),
             alert_log_scroll:  0,
             alert_log_filter:  AlertLogFilter::All,
-            show_config:       false,
-            detail_show_desc:  false,
-            fs_usage_history:  HashMap::new(),
+            show_config:         false,
+            config_reload_flash: None,
+            detail_show_desc:    false,
+            fs_usage_history:    HashMap::new(),
+            nfs_rtt_history:     HashMap::new(),
             should_quit:   false,
         };
 
@@ -541,11 +557,19 @@ impl App {
             Action::CycleTheme => {
                 self.theme_variant = self.theme_variant.next();
                 self.theme = Theme::for_variant(self.theme_variant);
+                user_state::UserState {
+                    theme_name:    self.theme_variant.name().to_string(),
+                    layout_preset: self.layout_preset,
+                }.save();
             }
 
             Action::CyclePreset => {
                 if self.active_view == ActiveView::Dashboard && !self.detail_open {
                     self.layout_preset = (self.layout_preset + 1) % 3;
+                    user_state::UserState {
+                        theme_name:    self.theme_variant.name().to_string(),
+                        layout_preset: self.layout_preset,
+                    }.save();
                 }
             }
 
@@ -1004,6 +1028,22 @@ impl App {
         // NFS mounts (cheap read of /proc/self/mountstats)
         self.nfs_mounts = nfs::read_nfs_mounts();
 
+        // Append RTT samples to per-mount history ringbuffers
+        let nfs_rtt_updates: Vec<(String, u64, u64)> = self.nfs_mounts.iter()
+            .map(|m| (
+                m.mount.clone(),
+                (m.read_rtt_ms  * 10.0) as u64,
+                (m.write_rtt_ms * 10.0) as u64,
+            ))
+            .collect();
+        for (mount, rrtt, wrtt) in nfs_rtt_updates {
+            let entry = self.nfs_rtt_history
+                .entry(mount)
+                .or_insert_with(|| (RingBuffer::new(60), RingBuffer::new(60)));
+            entry.0.push(rrtt);
+            entry.1.push(wrtt);
+        }
+
         // Accumulate write endurance per device
         let write_updates: Vec<(String, f64)> = self.devices.iter()
             .map(|d| (d.name.clone(), d.write_bytes_per_sec))
@@ -1023,10 +1063,14 @@ impl App {
         if let Some(path) = Config::config_path() {
             if let Ok(meta) = std::fs::metadata(&path) {
                 if let Ok(mtime) = meta.modified() {
+                    let is_initial = self.config_mtime.is_none();
                     let reload = self.config_mtime.map_or(true, |prev| mtime > prev);
                     if reload {
                         self.config       = Config::load();
                         self.config_mtime = Some(mtime);
+                        if !is_initial {
+                            self.config_reload_flash = Some(Instant::now());
+                        }
                     }
                 }
             }
@@ -1097,6 +1141,36 @@ impl App {
 
         // Persist write endurance on slow tick (every 30s)
         write_endurance::save(&self.write_endurance);
+
+        // Poll in-flight SMART self-test progress
+        let test_names: Vec<String> = self.smart_test_status.iter()
+            .filter(|(_, v)| v.contains("scheduled") || v.contains("Running:") || v.contains("progress"))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for name in &test_names {
+            if let Ok(out) = std::process::Command::new("smartctl")
+                .args(["-a", &format!("/dev/{}", name)])
+                .output()
+            {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if let Some(remaining) = parse_smart_test_remaining(&text) {
+                    let done = 100u8.saturating_sub(remaining);
+                    self.smart_test_status.insert(name.clone(), format!("Running: {}% done", done));
+                } else if !text.contains("% of test remaining") {
+                    // No longer in progress — determine final result
+                    let result = if text.contains("without error") {
+                        "✓ Completed OK".to_string()
+                    } else if text.contains("FAILED!") || (text.contains("# 1") && text.contains("Failed")) {
+                        "✗ FAILED".to_string()
+                    } else if text.contains("borted") {
+                        "⚠ Aborted".to_string()
+                    } else {
+                        continue; // ambiguous — keep polling
+                    };
+                    self.smart_test_status.insert(name.clone(), result);
+                }
+            }
+        }
 
         Ok(())
     }
@@ -1269,6 +1343,21 @@ fn parse_dd_rate(s: &str) -> Option<f64> {
         }
         if unit.eq_ignore_ascii_case("kB/s") || unit.eq_ignore_ascii_case("KiB/s") {
             return parts[i - 1].parse::<f64>().ok().map(|v| v / 1024.0);
+        }
+    }
+    None
+}
+
+/// Parse "N% of test remaining" from `smartctl -a` output.
+/// Returns the remaining percentage (0–100), or None if not present.
+fn parse_smart_test_remaining(text: &str) -> Option<u8> {
+    for line in text.lines() {
+        if line.contains("% of test remaining") {
+            for word in line.split_whitespace() {
+                if word.ends_with('%') {
+                    return word.trim_end_matches('%').parse::<u8>().ok();
+                }
+            }
         }
     }
     None

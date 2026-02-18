@@ -87,7 +87,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
         if let Some(idx) = app.device_list_state.selected() {
             if let Some(dev) = app.devices.get(idx) {
-                render_detail(f, cols[1], dev, app.detail_scroll, app.detail_history_window, &theme);
+                let test_status = app.smart_test_status.get(&dev.name).map(|s| s.as_str());
+                render_detail(f, cols[1], dev, app.detail_scroll, app.detail_history_window, test_status, &theme);
             }
         }
     } else if area.width < 100 {

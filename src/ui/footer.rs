@@ -36,7 +36,7 @@ pub fn render_footer(
         ],
         ActivePanel::Detail => &[
             ("Esc/h", "Back"), ("↑↓/jk", "Scroll"), ("w", "Window"),
-            ("s", "SMART"), ("t", "Theme"), ("q", "Quit"),
+            ("b", "Benchmark"), ("x", "SMART test"), ("t", "Theme"), ("q", "Quit"),
         ],
     };
 

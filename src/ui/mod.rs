@@ -1,4 +1,5 @@
 pub mod alerts_panel;
+pub mod benchmark_popup;
 pub mod dashboard;
 pub mod detail;
 pub mod device_list;

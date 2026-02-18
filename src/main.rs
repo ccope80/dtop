@@ -37,6 +37,10 @@ struct Cli {
     /// Print a one-shot JSON snapshot of all disk data and exit
     #[arg(long)]
     json: bool,
+
+    /// Print a human-readable health report and exit
+    #[arg(long)]
+    report: bool,
 }
 
 fn main() -> Result<()> {
@@ -44,6 +48,9 @@ fn main() -> Result<()> {
 
     if cli.json {
         return run_json_snapshot();
+    }
+    if cli.report {
+        return run_report();
     }
 
     let initial_theme = ui::theme::ThemeVariant::from_name(&cli.theme);
@@ -122,6 +129,14 @@ fn run_json_snapshot() -> Result<()> {
     });
 
     println!("{}", serde_json::to_string_pretty(&snapshot)?);
+    Ok(())
+}
+
+fn run_report() -> Result<()> {
+    use util::report;
+    let (devices, filesystems) = report::collect_snapshot();
+    let alerts = alerts::evaluate(&devices, &filesystems, &config::Config::load().alerts.thresholds);
+    print!("{}", report::generate(&devices, &filesystems, &alerts));
     Ok(())
 }
 

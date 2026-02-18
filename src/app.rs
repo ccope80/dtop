@@ -2,6 +2,7 @@ use crate::alerts::{self, Alert};
 use crate::collectors::{diskstats, filesystem, lsblk, lvm, mdraid, nfs, process_io, smart as smart_collector, smart_cache, zfs};
 use crate::util::{alert_log, webhook};
 use crate::config::Config;
+use crate::ui::benchmark_popup;
 use crate::input::{handle_key, Action};
 use crate::models::device::BlockDevice;
 use crate::models::filesystem::Filesystem;
@@ -52,6 +53,16 @@ const POLL_TIMEOUT: Duration = Duration::from_millis(150);
 struct SmartResult {
     device_name: String,
     data:        Option<SmartData>,
+}
+
+// ── Benchmark state ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BenchmarkState {
+    Idle,
+    Running(String),       // device name being tested
+    Done(String, f64),     // device name, MB/s
+    Error(String, String), // device name, error message
 }
 
 // ── App ───────────────────────────────────────────────────────────────
@@ -127,12 +138,21 @@ pub struct App {
     smart_rx:      mpsc::Receiver<SmartResult>,
     smart_pending: HashSet<String>,
 
+    // Benchmark
+    pub bench_state:  BenchmarkState,
+    bench_tx:         mpsc::Sender<(String, Result<f64, String>)>,
+    bench_rx:         mpsc::Receiver<(String, Result<f64, String>)>,
+
+    // SMART short test status (device_name -> status_line)
+    pub smart_test_status: HashMap<String, String>,
+
     pub should_quit: bool,
 }
 
 impl App {
     pub fn new(initial_theme: ThemeVariant) -> Result<Self> {
         let (smart_tx, smart_rx) = mpsc::channel();
+        let (bench_tx, bench_rx) = mpsc::channel();
         let config = Config::load();
 
         let mut app = Self {
@@ -173,6 +193,10 @@ impl App {
             smart_tx,
             smart_rx,
             smart_pending: HashSet::new(),
+            bench_state:  BenchmarkState::Idle,
+            bench_tx,
+            bench_rx,
+            smart_test_status: HashMap::new(),
             should_quit:   false,
         };
 
@@ -206,9 +230,11 @@ impl App {
     ) -> Result<()> {
         loop {
             self.consume_smart_results();
+            self.consume_bench_results();
 
-            let show_help  = self.show_help;
-            let theme_snap = self.theme.clone();
+            let show_help   = self.show_help;
+            let bench_state = self.bench_state.clone();
+            let theme_snap  = self.theme.clone();
 
             terminal.draw(|f| {
                 match self.active_view {
@@ -220,6 +246,9 @@ impl App {
                 }
                 if show_help {
                     help::render(f, &theme_snap);
+                }
+                if bench_state != BenchmarkState::Idle {
+                    benchmark_popup::render(f, &bench_state, &theme_snap);
                 }
             })?;
 
@@ -392,7 +421,10 @@ impl App {
             }
 
             Action::Back => {
-                if self.active_view != ActiveView::Dashboard {
+                // Dismiss benchmark popup first if showing
+                if self.bench_state != BenchmarkState::Idle {
+                    self.bench_state = BenchmarkState::Idle;
+                } else if self.active_view != ActiveView::Dashboard {
                     self.active_view = ActiveView::Dashboard;
                 } else {
                     self.detail_open   = false;
@@ -415,6 +447,32 @@ impl App {
             }
 
             Action::SmartRefresh => {}
+
+            Action::Benchmark => {
+                // Dismiss if already showing a result; start if in detail and idle
+                if self.bench_state != BenchmarkState::Idle {
+                    self.bench_state = BenchmarkState::Idle;
+                } else if self.detail_open {
+                    if let Some(idx) = self.device_list_state.selected() {
+                        if let Some(dev) = self.devices.get(idx) {
+                            let name = dev.name.clone();
+                            self.bench_state = BenchmarkState::Running(name.clone());
+                            self.run_benchmark(name);
+                        }
+                    }
+                }
+            }
+
+            Action::SmartTest => {
+                if self.detail_open {
+                    if let Some(idx) = self.device_list_state.selected() {
+                        if let Some(dev) = self.devices.get(idx) {
+                            let name = dev.name.clone();
+                            self.schedule_smart_test(&name);
+                        }
+                    }
+                }
+            }
 
             Action::ScrollUp => match self.active_view {
                 ActiveView::Dashboard => match self.active_panel {
@@ -568,6 +626,10 @@ impl App {
         let mut new_devices: Vec<BlockDevice> = Vec::new();
 
         for raw_name in raw.keys() {
+            // Skip devices matching exclude patterns from config
+            if self.config.devices.exclude.iter().any(|pat| glob_match(pat, raw_name)) {
+                continue;
+            }
             let existing_pos = self.devices.iter().position(|d| &d.name == raw_name);
             let mut dev = if let Some(pos) = existing_pos {
                 self.devices.remove(pos)
@@ -655,6 +717,48 @@ impl App {
         }
     }
 
+    // ── Benchmark ────────────────────────────────────────────────────
+
+    fn run_benchmark(&self, name: String) {
+        let tx = self.bench_tx.clone();
+        std::thread::spawn(move || {
+            let result = run_dd_benchmark(&name);
+            let _ = tx.send((name, result));
+        });
+    }
+
+    fn consume_bench_results(&mut self) {
+        while let Ok((name, result)) = self.bench_rx.try_recv() {
+            self.bench_state = match result {
+                Ok(mbs)  => BenchmarkState::Done(name, mbs),
+                Err(msg) => BenchmarkState::Error(name, msg),
+            };
+        }
+    }
+
+    // ── SMART self-test ──────────────────────────────────────────────
+
+    fn schedule_smart_test(&mut self, name: &str) {
+        let dev_path = format!("/dev/{}", name);
+        let output = std::process::Command::new("smartctl")
+            .args(["-t", "short", &dev_path])
+            .output();
+        let status = match output {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if text.contains("Test has begun") || text.contains("SMART offline immediate test") {
+                    "Short test scheduled (~2 min)".to_string()
+                } else if text.contains("previous self-test") {
+                    "Test already in progress".to_string()
+                } else {
+                    "Test scheduled (check smartctl -a)".to_string()
+                }
+            }
+            Err(e) => format!("smartctl error: {}", e),
+        };
+        self.smart_test_status.insert(name.to_string(), status);
+    }
+
     // ── Process sort ──────────────────────────────────────────────────
 
     fn sort_processes(&mut self) {
@@ -680,4 +784,56 @@ impl App {
 fn type_order(t: &crate::models::device::DeviceType) -> u8 {
     use crate::models::device::DeviceType::*;
     match t { NVMe => 0, SSD => 1, HDD => 2, Virtual => 3, Unknown => 4 }
+}
+
+/// Run `dd` sequential read benchmark on /dev/{name} using O_DIRECT.
+/// Returns MB/s or an error string.
+fn run_dd_benchmark(name: &str) -> Result<f64, String> {
+    let dev_path = format!("/dev/{}", name);
+    let out = std::process::Command::new("dd")
+        .args([
+            &format!("if={}", dev_path),
+            "of=/dev/null",
+            "bs=1M",
+            "count=256",
+            "iflag=direct",
+        ])
+        .output()
+        .map_err(|e| format!("dd error: {}", e))?;
+
+    // dd writes stats to stderr
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    parse_dd_rate(&stderr)
+        .or_else(|| parse_dd_rate(&String::from_utf8_lossy(&out.stdout)))
+        .ok_or_else(|| format!("Could not parse dd output: {}", stderr.trim()))
+}
+
+/// Parse "N MB/s" or "N GB/s" from dd output.
+fn parse_dd_rate(s: &str) -> Option<f64> {
+    // dd output: "268435456 bytes (268 MB, 256 MiB) copied, 1.23 s, 218 MB/s"
+    let last = s.lines().last()?;
+    let parts: Vec<&str> = last.split_whitespace().collect();
+    // Find the number immediately before "MB/s" or "GB/s" or "kB/s"
+    for i in 1..parts.len() {
+        let unit = parts[i];
+        if unit.eq_ignore_ascii_case("MB/s") || unit.eq_ignore_ascii_case("MiB/s") {
+            return parts[i - 1].parse::<f64>().ok();
+        }
+        if unit.eq_ignore_ascii_case("GB/s") || unit.eq_ignore_ascii_case("GiB/s") {
+            return parts[i - 1].parse::<f64>().ok().map(|v| v * 1024.0);
+        }
+        if unit.eq_ignore_ascii_case("kB/s") || unit.eq_ignore_ascii_case("KiB/s") {
+            return parts[i - 1].parse::<f64>().ok().map(|v| v / 1024.0);
+        }
+    }
+    None
+}
+
+/// Simple glob match: `*` matches any number of chars, no other wildcards.
+fn glob_match(pattern: &str, name: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        name.starts_with(prefix)
+    } else {
+        pattern == name
+    }
 }

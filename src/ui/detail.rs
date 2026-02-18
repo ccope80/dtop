@@ -23,6 +23,7 @@ pub fn render_detail(
     device: &BlockDevice,
     scroll: usize,
     history_window: usize,
+    smart_test_status: Option<&str>,
     theme: &Theme,
 ) {
     let win_label = WINDOWS[history_window.min(2)].1;
@@ -50,7 +51,7 @@ pub fn render_detail(
         .split(inner);
 
     render_sparklines(f, sections[0], device, history_window, theme);
-    render_info(f, sections[1], device, scroll, theme);
+    render_info(f, sections[1], device, scroll, smart_test_status, theme);
 }
 
 fn render_sparklines(f: &mut Frame, area: Rect, device: &BlockDevice, history_window: usize, theme: &Theme) {
@@ -156,7 +157,7 @@ fn lat_style(ms: f64, theme: &Theme) -> Style {
     else               { theme.crit }
 }
 
-fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, theme: &Theme) {
+fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, smart_test_status: Option<&str>, theme: &Theme) {
     let mut lines: Vec<Line> = Vec::new();
 
     // ── Device info ───────────────────────────────────────────────────
@@ -166,6 +167,56 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, t
     if let Some(s) = &device.serial   { lines.push(kv("Serial",    s, theme)); }
     if let Some(t) = &device.transport { lines.push(kv("Transport", &t.to_uppercase(), theme)); }
     lines.push(Line::from(vec![]));
+
+    // ── Drive endurance / lifespan estimate ───────────────────────────
+    if let Some(smart) = &device.smart {
+        if let Some(nvme) = &smart.nvme {
+            // NVMe: percentage_used from SMART health log
+            let used_pct = nvme.percentage_used as usize;
+            let remain   = 100usize.saturating_sub(used_pct);
+            let bar_used = (used_pct * 20 / 100).min(20);
+            let bar_free = 20 - bar_used;
+            let endurance_style = if used_pct >= 90 { theme.crit }
+                                  else if used_pct >= 70 { theme.warn }
+                                  else { theme.ok };
+            lines.push(section_header("── NVMe Endurance ", theme));
+            lines.push(Line::from(vec![
+                Span::styled("  Endurance Used  ", theme.text_dim),
+                Span::styled("█".repeat(bar_used), endurance_style),
+                Span::styled("░".repeat(bar_free), theme.text_dim),
+                Span::styled(format!("  {}% used, {}% remaining", used_pct, remain), endurance_style),
+            ]));
+            lines.push(kv("Data Written", &fmt_bytes(nvme.bytes_written()), theme));
+            lines.push(Line::from(vec![]));
+        } else if let Some(poh) = smart.power_on_hours {
+            // HDD/SSD: power-on hours vs ~50k hour lifespan estimate
+            const LIFESPAN_H: u64 = 50_000;
+            let pct = ((poh * 100) / LIFESPAN_H).min(100) as usize;
+            let remain_h = LIFESPAN_H.saturating_sub(poh);
+            let bar_used = (pct * 20 / 100).min(20);
+            let bar_free = 20 - bar_used;
+            let life_style = if pct >= 90 { theme.crit }
+                             else if pct >= 70 { theme.warn }
+                             else { theme.ok };
+            lines.push(section_header("── Estimated Lifespan ", theme));
+            lines.push(Line::from(vec![
+                Span::styled("  Life Consumed   ", theme.text_dim),
+                Span::styled("█".repeat(bar_used), life_style),
+                Span::styled("░".repeat(bar_free), theme.text_dim),
+                Span::styled(format!("  {}h / ~{}kh  ({} h remaining)", poh, LIFESPAN_H / 1000, remain_h), theme.text_dim),
+            ]));
+            lines.push(Line::from(vec![]));
+        }
+    }
+
+    // ── SMART test status ─────────────────────────────────────────────
+    if let Some(status) = smart_test_status {
+        lines.push(Line::from(vec![
+            Span::styled("  SMART test: ", theme.text_dim),
+            Span::styled(status.to_string(), theme.ok),
+        ]));
+        lines.push(Line::from(vec![]));
+    }
 
     // ── SMART / NVMe ──────────────────────────────────────────────────
     if let Some(smart) = &device.smart {

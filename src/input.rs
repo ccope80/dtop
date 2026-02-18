@@ -21,6 +21,8 @@ pub enum Action {
     ViewFilesystem,
     ViewVolume,
     ViewNfs,       // F5: NFS / network mount latency view
+    Benchmark,     // b: run quick read benchmark on selected device
+    SmartTest,     // x: schedule SMART short self-test on selected device
     None,
 }
 
@@ -58,6 +60,10 @@ pub fn handle_key(key: KeyEvent) -> Action {
         (KeyCode::F(3), _) => Action::ViewFilesystem,
         (KeyCode::F(4), _) => Action::ViewVolume,
         (KeyCode::F(5), _) => Action::ViewNfs,
+
+        // Device actions (detail view)
+        (KeyCode::Char('b'), _) => Action::Benchmark,
+        (KeyCode::Char('x'), _) => Action::SmartTest,
 
         _ => Action::None,
     }

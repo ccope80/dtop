@@ -46,6 +46,8 @@ pub fn render(f: &mut Frame, theme: &Theme) {
         key_line(theme, "  s",     "Force SMART refresh"),
         key_line(theme, "  p",     "Cycle layout preset"),
         key_line(theme, "  w",     "Cycle history window (60s/5m/1h)"),
+        key_line(theme, "  b",     "Quick read benchmark (detail view)"),
+        key_line(theme, "  x",     "Schedule SMART short self-test"),
     ];
 
     let right = vec![

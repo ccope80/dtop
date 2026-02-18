@@ -102,7 +102,7 @@ struct Cli {
     #[arg(long)]
     top_io: bool,
 
-    /// Number of processes to show with --top-io (default 10)
+    /// Row/sample limit: processes for --top-io, iterations for --iostat (0 = loop, default 10)
     #[arg(long, default_value_t = 10)]
     count: usize,
 
@@ -201,6 +201,18 @@ struct Cli {
     /// Sample filesystem fill rates and print a fill-forecast table, then exit
     #[arg(long)]
     forecast: bool,
+
+    /// Rolling per-device I/O stats at 1-second intervals; optional DEVICE filter
+    #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
+    iostat: Option<String>,
+
+    /// Device capacity inventory table (lsblk + SMART cache, no polling)
+    #[arg(long)]
+    capacity: bool,
+
+    /// Look up a single SMART attribute by ID or name substring: DEVICE ATTR
+    #[arg(long, num_args = 2, value_names = ["DEVICE", "ATTR"])]
+    smart_attr: Option<Vec<String>>,
 }
 
 fn main() -> Result<()> {
@@ -280,6 +292,16 @@ fn main() -> Result<()> {
     }
     if cli.forecast {
         return run_forecast();
+    }
+    if let Some(dev_or_all) = &cli.iostat {
+        let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
+        return run_iostat(dev, cli.count);
+    }
+    if cli.capacity {
+        return run_capacity();
+    }
+    if let Some(parts) = &cli.smart_attr {
+        return run_smart_attr(&parts[0], &parts[1]);
     }
     if cli.config {
         return run_print_config();
@@ -2317,6 +2339,193 @@ fn run_forecast() -> Result<()> {
             eta_str,
         );
     }
+    Ok(())
+}
+
+// ── --iostat ──────────────────────────────────────────────────────────────────
+
+fn run_iostat(device: Option<&str>, count: usize) -> Result<()> {
+    use collectors::diskstats;
+    use util::human::fmt_bytes;
+
+    let loop_forever = count == 0;
+    let dev_filter = device.map(|d| d.trim_start_matches("/dev/").to_string());
+
+    println!("{:<10}  {:>9}  {:>9}  {:>7}  {:>7}  {:>6}  {:>9}  {:>9}",
+        "Device", "Read/s", "Write/s", "rIOPS", "wIOPS", "Util%", "rLat(ms)", "wLat(ms)");
+    println!("{}", "─".repeat(80));
+
+    let mut prev = diskstats::read_diskstats()?;
+    let mut t0 = std::time::Instant::now();
+    let mut iteration = 0usize;
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let curr = diskstats::read_diskstats()?;
+        let elapsed = t0.elapsed().as_secs_f64();
+        t0 = std::time::Instant::now();
+
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!("── {} ─────────────────────────────────────────────────────────────────", ts);
+
+        let mut dev_names: Vec<String> = curr.keys().cloned().collect();
+        dev_names.sort();
+
+        for dev in &dev_names {
+            if let Some(ref f) = dev_filter {
+                if dev != f { continue; }
+            }
+            if let (Some(p), Some(c)) = (prev.get(dev), curr.get(dev)) {
+                let io = diskstats::compute_io(p, c, elapsed, 0);
+                println!("{:<10}  {:>9}  {:>9}  {:>7.0}  {:>7.0}  {:>5.1}%  {:>9.2}  {:>9.2}",
+                    dev,
+                    fmt_bytes(io.read_bytes_per_sec as u64),
+                    fmt_bytes(io.write_bytes_per_sec as u64),
+                    io.read_iops,
+                    io.write_iops,
+                    io.io_util_pct,
+                    io.avg_read_latency_ms,
+                    io.avg_write_latency_ms,
+                );
+            }
+        }
+
+        prev = curr;
+        iteration += 1;
+        if !loop_forever && iteration >= count { break; }
+    }
+    Ok(())
+}
+
+// ── --capacity ────────────────────────────────────────────────────────────────
+
+fn run_capacity() -> Result<()> {
+    use collectors::{lsblk, smart_cache};
+    use util::human::fmt_bytes;
+
+    let disks  = lsblk::run_lsblk()?;
+    let cache  = smart_cache::load();
+
+    println!("{:<10}  {:>5}  {:>10}  {:<32}  {:>6}  {:>7}  {}",
+        "Device", "Type", "Capacity", "Model", "POH", "SMART", "Serial");
+    println!("{}", "─".repeat(88));
+
+    let mut total: u64 = 0;
+
+    for disk in &disks {
+        let smart = cache.get(&disk.name);
+
+        let dev_type = match disk.transport.as_deref() {
+            Some("nvme") => "NVMe",
+            _ if !disk.rotational => "SSD",
+            _ => "HDD",
+        };
+
+        let model = disk.model.as_deref().unwrap_or("—");
+        let model_trunc = if model.len() > 32 { &model[..32] } else { model };
+        let serial = disk.serial.as_deref().unwrap_or("—");
+
+        let poh_str = smart
+            .and_then(|s| s.power_on_hours)
+            .map(|h| format!("{}h", h))
+            .unwrap_or_else(|| "—".to_string());
+
+        let status_str = smart
+            .map(|s| s.status.label().trim().to_string())
+            .unwrap_or_else(|| "—".to_string());
+
+        total += disk.size;
+
+        println!("{:<10}  {:>5}  {:>10}  {:<32}  {:>6}  {:>7}  {}",
+            disk.name, dev_type, fmt_bytes(disk.size),
+            model_trunc, poh_str, status_str, serial,
+        );
+    }
+
+    println!("{}", "─".repeat(88));
+    println!("{:<10}  {:>5}  {:>10}  ({} device{})",
+        "TOTAL", "", fmt_bytes(total), disks.len(), if disks.len() == 1 { "" } else { "s" });
+    Ok(())
+}
+
+// ── --smart-attr ──────────────────────────────────────────────────────────────
+
+fn run_smart_attr(device: &str, attr_query: &str) -> Result<()> {
+    let dev_name = device.trim_start_matches("/dev/");
+    let dev_path = format!("/dev/{}", dev_name);
+
+    let out = std::process::Command::new("smartctl")
+        .args(["--json=c", "-a", &dev_path])
+        .output()
+        .map_err(|e| anyhow::anyhow!("smartctl failed: {}", e))?;
+
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| serde_json::json!({}));
+
+    // ATA SMART attributes
+    if let Some(attrs) = json["ata_smart_attributes"]["table"].as_array() {
+        let query_id: Option<u64> = attr_query.parse().ok();
+        let query_lc  = attr_query.to_lowercase();
+
+        let matches: Vec<_> = attrs.iter().filter(|attr| {
+            let id   = attr["id"].as_u64().unwrap_or(0);
+            let name = attr["name"].as_str().unwrap_or("").to_lowercase();
+            query_id.map_or(false, |q| q == id) || name.contains(&query_lc)
+        }).collect();
+
+        if matches.is_empty() {
+            println!("No ATA SMART attribute matching '{}' on {}.", attr_query, dev_name);
+            return Ok(());
+        }
+
+        println!("{:>3}  {:<36}  {:>5}  {:>5}  {:>5}  {:<16}  Prefail  Status",
+            "ID", "Attribute", "Value", "Worst", "Thresh", "Raw");
+        println!("{}", "─".repeat(90));
+
+        for attr in matches {
+            let id     = attr["id"].as_u64().unwrap_or(0);
+            let name   = attr["name"].as_str().unwrap_or("?");
+            let value  = attr["value"].as_u64().unwrap_or(0);
+            let worst  = attr["worst"].as_u64().unwrap_or(0);
+            let thresh = attr["thresh"].as_u64().unwrap_or(0);
+            let raw_s  = attr["raw"]["string"].as_str().unwrap_or("?");
+            let prefail = attr["flags"]["prefailure"].as_bool().unwrap_or(false);
+            let failed  = attr["when_failed"].as_str().unwrap_or("-");
+
+            let status = if failed != "-" && !failed.is_empty() { "FAILED" }
+                else if prefail && thresh > 0 && value <= thresh + 10 { "AT RISK" }
+                else { "OK" };
+
+            println!("{:>3}  {:<36}  {:>5}  {:>5}  {:>5}  {:<16}  {:>7}  {}",
+                id, name, value, worst, thresh, raw_s,
+                if prefail { "yes" } else { "no" },
+                status,
+            );
+        }
+        return Ok(());
+    }
+
+    // NVMe — show health log fields
+    if let Some(nvme) = json.get("nvme_smart_health_information_log") {
+        let query_lc = attr_query.to_lowercase();
+        println!("NVMe health log for {} (matching '{}'):", dev_name, attr_query);
+        println!("{}", "─".repeat(60));
+        let mut found = false;
+        if let Some(obj) = nvme.as_object() {
+            for (k, v) in obj {
+                if k.to_lowercase().contains(&query_lc) {
+                    println!("  {:<42}  {}", k, v);
+                    found = true;
+                }
+            }
+        }
+        if !found {
+            println!("  (no field matching '{}' — try 'temperature', 'spare', 'written')", attr_query);
+        }
+        return Ok(());
+    }
+
+    println!("No SMART attribute data found for {}.", dev_name);
     Ok(())
 }
 

@@ -54,7 +54,7 @@ struct Cli {
     #[arg(long)]
     alerts: bool,
 
-    /// Number of alert log entries to show (used with --alerts)
+    /// Number of entries to show (used with --alerts and --dmesg)
     #[arg(long, default_value_t = 50)]
     last: usize,
 
@@ -237,6 +237,22 @@ struct Cli {
     /// Print active mount table with key options (rw/ro, discard, errors, etc.)
     #[arg(long)]
     mount: bool,
+
+    /// Show kernel storage messages from dmesg -T; optional DEVICE filter
+    #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
+    dmesg: Option<String>,
+
+    /// Read-verify DEVICE for I/O errors (dd conv=noerror,sync iflag=direct)
+    #[arg(long, value_name = "DEVICE")]
+    verify: Option<String>,
+
+    /// Size in MiB to read for --verify (default 256)
+    #[arg(long, default_value_t = 256)]
+    size: usize,
+
+    /// Show partition table for DEVICE augmented with UUID, FS type, and mount
+    #[arg(long, value_name = "DEVICE")]
+    partition_table: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -346,6 +362,16 @@ fn main() -> Result<()> {
     }
     if cli.mount {
         return run_mount();
+    }
+    if let Some(dev_or_all) = &cli.dmesg {
+        let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
+        return run_dmesg(dev, cli.last);
+    }
+    if let Some(dev) = &cli.verify {
+        return run_verify(dev, cli.size);
+    }
+    if let Some(dev) = &cli.partition_table {
+        return run_partition_table(dev);
     }
     if cli.config {
         return run_print_config();
@@ -2948,6 +2974,203 @@ fn run_mount() -> Result<()> {
         let ro_marker = if *ro { " [RO]" } else { "" };
         println!("{:<22}  {:<24}  {:<8}  {}{}",
             dev_short, mount, fstype, opts, ro_marker);
+    }
+    Ok(())
+}
+
+// ── --dmesg ───────────────────────────────────────────────────────────────────
+
+fn run_dmesg(device: Option<&str>, last: usize) -> Result<()> {
+    const STORAGE_PAT: &[&str] = &[
+        "I/O error", "blk_update_request", "Buffer I/O",
+        "ata", "scsi", "nvme", "virtio_scsi",
+        " sd ", "sda", "sdb", "sdc", "sdd",
+        "EXT4-fs", "XFS", "BTRFS", "jbd2", "ext4",
+        "hard resetting link", "Exception Emask", "failed command",
+        "reset failed", "medium error", "sense key", "disk error",
+        "SCSI error", "Unrecovered read error",
+    ];
+
+    let out = std::process::Command::new("dmesg")
+        .arg("-T")
+        .output()
+        .map_err(|e| anyhow::anyhow!("dmesg failed: {}", e))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    let dev_name = device.map(|d| d.trim_start_matches("/dev/"));
+    let display  = dev_name
+        .map(|d| format!("device '{}'", d))
+        .unwrap_or_else(|| "all storage events".to_string());
+
+    let matched: Vec<&str> = stdout.lines().filter(|line| {
+        match dev_name {
+            Some(dev) => line.contains(dev),
+            None      => STORAGE_PAT.iter().any(|p| line.contains(p)),
+        }
+    }).collect();
+
+    let total = matched.len();
+    let skip  = total.saturating_sub(last);
+    let shown = &matched[skip..];
+
+    if shown.is_empty() {
+        println!("No kernel messages found for {}.", display);
+        return Ok(());
+    }
+
+    println!("dmesg — {}  (showing {} of {} matching lines)", display, shown.len(), total);
+    println!("{}", "─".repeat(80));
+    for line in shown {
+        println!("{}", line);
+    }
+    Ok(())
+}
+
+// ── --verify ──────────────────────────────────────────────────────────────────
+
+fn run_verify(device: &str, size_mib: usize) -> Result<()> {
+    let dev_path = if device.starts_with("/dev/") {
+        device.to_string()
+    } else {
+        format!("/dev/{}", device)
+    };
+    let block_count = size_mib * 2; // bs=512K → 2 blocks per MiB
+
+    println!("Read-verify: {} MiB from {}  (O_DIRECT, conv=noerror,sync)", size_mib, dev_path);
+    println!("Bad blocks will be reported below; replaced with zeros in output stream.");
+    println!("Running…");
+
+    let t0  = std::time::Instant::now();
+    let out = std::process::Command::new("dd")
+        .args([
+            format!("if={}", dev_path).as_str(),
+            "of=/dev/null",
+            "bs=512K",
+            &format!("count={}", block_count),
+            "conv=noerror,sync",
+            "iflag=direct",
+        ])
+        .output()
+        .map_err(|e| anyhow::anyhow!("dd failed: {}", e))?;
+
+    let elapsed = t0.elapsed().as_secs_f64();
+    let stderr  = String::from_utf8_lossy(&out.stderr);
+    let stdout  = String::from_utf8_lossy(&out.stdout);
+
+    // Error lines: contain "error" but aren't the final summary
+    let errors: Vec<&str> = stderr.lines().chain(stdout.lines())
+        .filter(|l| l.to_lowercase().contains("error") && !l.contains("records"))
+        .collect();
+
+    // Summary line: "N bytes ... copied, N s, N MB/s"
+    let summary = stderr.lines().chain(stdout.lines())
+        .filter(|l| l.contains("bytes") && l.contains("copied"))
+        .last()
+        .unwrap_or("(no summary from dd)");
+
+    println!();
+    if errors.is_empty() {
+        println!("Result:  No I/O errors detected ✓");
+    } else {
+        println!("Result:  I/O ERRORS DETECTED  ({} error line(s))", errors.len());
+    }
+    println!("Elapsed: {:.1}s", elapsed);
+    println!("dd:      {}", summary);
+
+    if !errors.is_empty() {
+        println!();
+        println!("Error details:");
+        for e in &errors {
+            println!("  {}", e);
+        }
+    }
+    Ok(())
+}
+
+// ── --partition-table ─────────────────────────────────────────────────────────
+
+fn extract_quoted(text: &str, key: &str) -> String {
+    let needle = format!("{}=\"", key);
+    text.find(&needle)
+        .and_then(|i| {
+            let s = &text[i + needle.len()..];
+            s.find('"').map(|j| s[..j].to_string())
+        })
+        .unwrap_or_default()
+}
+
+fn run_partition_table(device: &str) -> Result<()> {
+    let dev_path = if device.starts_with("/dev/") {
+        device.to_string()
+    } else {
+        format!("/dev/{}", device)
+    };
+
+    // /proc/mounts: device → mountpoint
+    let mounts: std::collections::HashMap<String, String> =
+        std::fs::read_to_string("/proc/mounts")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split_whitespace();
+                let dev = f.next()?.to_string();
+                let mnt = f.next()?.to_string();
+                Some((dev, mnt))
+            })
+            .collect();
+
+    // blkid: device → (uuid, fstype)
+    let blkid_raw = std::process::Command::new("blkid")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let blkid: std::collections::HashMap<String, (String, String)> = blkid_raw
+        .lines()
+        .filter_map(|line| {
+            let (dev, rest) = line.split_once(':')?;
+            let uuid   = extract_quoted(rest, "UUID");
+            let fstype = extract_quoted(rest, "TYPE");
+            Some((dev.trim().to_string(), (uuid, fstype)))
+        })
+        .collect();
+
+    // fdisk -l for partition layout
+    let fdisk_out = std::process::Command::new("fdisk")
+        .args(["-l", &dev_path])
+        .output()
+        .map_err(|e| anyhow::anyhow!("fdisk failed: {}", e))?;
+    let fdisk_str = String::from_utf8_lossy(&fdisk_out.stdout);
+
+    let mut past_header = false;
+    for line in fdisk_str.lines() {
+        if line.starts_with("Device") {
+            past_header = true;
+            println!();
+            println!("{:<16}  {:>6}  {:<8}  {:<36}  {:<14}  {}",
+                "Partition", "Size", "FS", "UUID", "Type", "Mount");
+            println!("{}", "─".repeat(96));
+            continue;
+        }
+        if !past_header {
+            if !line.trim().is_empty() { println!("{}", line); }
+            continue;
+        }
+        if line.trim().is_empty() || line.starts_with("Partition table") { continue; }
+
+        let t: Vec<&str> = line.split_whitespace().collect();
+        if t.is_empty() || !t[0].starts_with('/') { continue; }
+
+        let part  = t[0];
+        let size  = t.get(4).copied().unwrap_or("?");
+        let ptype = if t.len() > 5 { t[5..].join(" ") } else { "?".to_string() };
+        let ptype_short = if ptype.len() > 14 { format!("{}..", &ptype[..12]) } else { ptype };
+
+        let (uuid, fstype) = blkid.get(part)
+            .map(|(u, t)| (u.as_str(), t.as_str()))
+            .unwrap_or(("—", "—"));
+        let mount = mounts.get(part).map(|s| s.as_str()).unwrap_or("—");
+
+        println!("{:<16}  {:>6}  {:<8}  {:<36}  {:<14}  {}", part, size, fstype, uuid, ptype_short, mount);
     }
     Ok(())
 }

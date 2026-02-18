@@ -213,6 +213,18 @@ struct Cli {
     /// Look up a single SMART attribute by ID or name substring: DEVICE ATTR
     #[arg(long, num_args = 2, value_names = ["DEVICE", "ATTR"])]
     smart_attr: Option<Vec<String>>,
+
+    /// Print low-level sysfs device parameters for DEVICE
+    #[arg(long, value_name = "DEVICE")]
+    disk_info: Option<String>,
+
+    /// Query HDD power state via hdparm -C; omit DEVICE to check all HDDs
+    #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
+    power_state: Option<String>,
+
+    /// Show cumulative I/O totals since boot (bytes, ops, avg latency) per device
+    #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
+    cumulative_io: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -302,6 +314,17 @@ fn main() -> Result<()> {
     }
     if let Some(parts) = &cli.smart_attr {
         return run_smart_attr(&parts[0], &parts[1]);
+    }
+    if let Some(dev) = &cli.disk_info {
+        return run_disk_info(dev);
+    }
+    if let Some(dev_or_all) = &cli.power_state {
+        let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
+        return run_power_state(dev);
+    }
+    if let Some(dev_or_all) = &cli.cumulative_io {
+        let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
+        return run_cumulative_io(dev);
     }
     if cli.config {
         return run_print_config();
@@ -2526,6 +2549,187 @@ fn run_smart_attr(device: &str, attr_query: &str) -> Result<()> {
     }
 
     println!("No SMART attribute data found for {}.", dev_name);
+    Ok(())
+}
+
+// ── --disk-info ───────────────────────────────────────────────────────────────
+
+fn run_disk_info(device: &str) -> Result<()> {
+    use util::human::fmt_bytes;
+
+    let dev = device.trim_start_matches("/dev/");
+    let base = format!("/sys/block/{}", dev);
+
+    if !std::path::Path::new(&base).exists() {
+        eprintln!("Device not found in sysfs: /sys/block/{}", dev);
+        std::process::exit(1);
+    }
+
+    // Helpers to read a sysfs file, returning "—" on error
+    let rd = |rel: &str| -> String {
+        std::fs::read_to_string(format!("{}/{}", base, rel))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "—".to_string())
+    };
+    let q = |attr: &str| -> String {
+        std::fs::read_to_string(format!("{}/queue/{}", base, attr))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "—".to_string())
+    };
+
+    // Capacity from sysfs size (unit = 512-byte sectors)
+    let size_sectors: u64 = rd("size").parse().unwrap_or(0);
+    let capacity_str = if size_sectors > 0 {
+        format!("{} ({} sectors × 512 B)", fmt_bytes(size_sectors * 512), size_sectors)
+    } else {
+        "—".to_string()
+    };
+
+    // Discard / TRIM support
+    let discard_max: u64 = q("discard_max_bytes").parse().unwrap_or(0);
+    let discard_str = if discard_max > 0 {
+        format!("yes  (max {})", fmt_bytes(discard_max))
+    } else {
+        "no".to_string()
+    };
+
+    // WBT latency target (0 = disabled)
+    let wbt_raw = q("wbt_lat_usec");
+    let wbt_str = match wbt_raw.parse::<u64>() {
+        Ok(0) | Err(_) => "disabled".to_string(),
+        Ok(us)         => format!("{} µs", us),
+    };
+
+    let rotational = q("rotational");
+    let rot_str = if rotational == "1" { "yes (HDD)" } else { "no (SSD/NVMe)" };
+
+    let removable = rd("removable");
+    let rem_str = if removable == "1" { "yes" } else { "no" };
+
+    println!("Device info — /dev/{}  (/sys/block/{})", dev, dev);
+    println!("{}", "─".repeat(62));
+
+    let row = |label: &str, value: &str| println!("  {:<32}  {}", label, value);
+
+    row("Capacity",                  &capacity_str);
+    row("Logical sector size",       &format!("{} B", q("logical_block_size")));
+    row("Physical sector size",      &format!("{} B", q("physical_block_size")));
+    row("HW sector size",            &format!("{} B", q("hw_sector_size")));
+    row("Rotational",                rot_str);
+    row("Removable",                 rem_str);
+    println!();
+
+    row("I/O scheduler",             &q("scheduler"));
+    row("Queue depth (nr_requests)", &q("nr_requests"));
+    row("Read-ahead",                &format!("{} KiB", q("read_ahead_kb")));
+    row("Max request size",          &format!("{} KiB", q("max_sectors_kb")));
+    row("Write cache",               &q("write_cache"));
+    row("WBT latency target",        &wbt_str);
+    println!();
+
+    row("TRIM / discard support",    &discard_str);
+    row("Zoned device",              &q("zoned"));
+    row("DAX (direct access)",       &q("dax"));
+
+    Ok(())
+}
+
+// ── --power-state ─────────────────────────────────────────────────────────────
+
+fn run_power_state(device: Option<&str>) -> Result<()> {
+    let skip = ["loop", "sr", "fd", "ram", "zram"];
+
+    let devs: Vec<String> = if let Some(dev) = device {
+        vec![dev.trim_start_matches("/dev/").to_string()]
+    } else {
+        // All rotational block devices
+        let mut v: Vec<String> = std::fs::read_dir("/sys/block")
+            .map_err(|e| anyhow::anyhow!("cannot read /sys/block: {}", e))?
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                if skip.iter().any(|p| name.starts_with(p)) { return None; }
+                let rotational = std::fs::read_to_string(
+                    format!("/sys/block/{}/queue/rotational", name))
+                    .map(|s| s.trim() == "1")
+                    .unwrap_or(false);
+                if rotational { Some(name) } else { None }
+            })
+            .collect();
+        v.sort();
+        v
+    };
+
+    if devs.is_empty() {
+        println!("No HDD devices found. (SSDs and NVMe do not have a traditional power state.)");
+        return Ok(());
+    }
+
+    println!("{:<12}  {}", "Device", "Power State");
+    println!("{}", "─".repeat(36));
+
+    for dev in &devs {
+        let out = std::process::Command::new("hdparm")
+            .args(["-C", &format!("/dev/{}", dev)])
+            .output();
+
+        let state = match out {
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stdout);
+                s.lines()
+                    .find(|l| l.contains("drive state is:"))
+                    .and_then(|l| l.split(':').nth(1).map(|s| s.trim().to_string()))
+                    .unwrap_or_else(|| "unknown".to_string())
+            }
+            Err(e) => format!("error: {}", e),
+        };
+        println!("{:<12}  {}", dev, state);
+    }
+    Ok(())
+}
+
+// ── --cumulative-io ───────────────────────────────────────────────────────────
+
+fn run_cumulative_io(device: Option<&str>) -> Result<()> {
+    use collectors::diskstats;
+    use util::human::fmt_bytes;
+
+    let raw = diskstats::read_diskstats()?;
+    let dev_filter = device.map(|d| d.trim_start_matches("/dev/").to_string());
+
+    let mut devs: Vec<(&String, &diskstats::RawDiskstat)> = raw.iter().collect();
+    devs.sort_by(|a, b| a.0.cmp(b.0));
+
+    println!("{:<10}  {:>13}  {:>13}  {:>10}  {:>10}  {:>8}  {:>9}  {:>9}",
+        "Device", "Total Read", "Total Written", "Read Ops", "Write Ops",
+        "In-Flight", "Avg rLat", "Avg wLat");
+    println!("{}", "─".repeat(96));
+
+    for (dev, stat) in &devs {
+        if let Some(ref f) = dev_filter {
+            if *dev != f { continue; }
+        }
+
+        let read_bytes  = stat.sectors_read    * 512;
+        let write_bytes = stat.sectors_written * 512;
+        let avg_r_ms = if stat.reads_completed  > 0 {
+            stat.ms_reading as f64 / stat.reads_completed  as f64
+        } else { 0.0 };
+        let avg_w_ms = if stat.writes_completed > 0 {
+            stat.ms_writing as f64 / stat.writes_completed as f64
+        } else { 0.0 };
+
+        println!("{:<10}  {:>13}  {:>13}  {:>10}  {:>10}  {:>8}  {:>8.2}ms  {:>8.2}ms",
+            dev,
+            fmt_bytes(read_bytes),
+            fmt_bytes(write_bytes),
+            stat.reads_completed,
+            stat.writes_completed,
+            stat.ios_in_progress,
+            avg_r_ms,
+            avg_w_ms,
+        );
+    }
     Ok(())
 }
 

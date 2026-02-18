@@ -4,6 +4,11 @@ All notable changes to dtop are documented here.
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-02-18
+
+### Fixed
+- Man page: replaced invalid troff `\(updo`/`\(downarrow` escapes with plain text, eliminating `special character not defined` warnings on `man dtop`
+
 ## [0.1.0] — 2026-02-18
 
 ### Phase 48 Changes

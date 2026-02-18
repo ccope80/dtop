@@ -1,6 +1,6 @@
 use crate::alerts::{self, Alert};
 use crate::collectors::{diskstats, filesystem, lsblk, lvm, mdraid, nfs, process_io, smart as smart_collector, smart_cache, zfs};
-use crate::util::{alert_log, smart_anomaly, smart_baseline, webhook};
+use crate::util::{alert_log, health_history, smart_anomaly, smart_baseline, webhook};
 use crate::config::Config;
 use crate::ui::benchmark_popup;
 use crate::input::{handle_key, Action};
@@ -83,6 +83,24 @@ pub enum ActiveView {
     FilesystemOverview,
     VolumeManager,
     NfsView,
+    AlertLog,
+}
+
+#[derive(Debug, Clone, PartialEq, Copy)]
+pub enum AlertLogFilter {
+    All,
+    Crit,
+    Warn,
+}
+
+impl AlertLogFilter {
+    pub fn next(&self) -> Self {
+        match self {
+            AlertLogFilter::All  => AlertLogFilter::Crit,
+            AlertLogFilter::Crit => AlertLogFilter::Warn,
+            AlertLogFilter::Warn => AlertLogFilter::All,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -224,6 +242,14 @@ pub struct App {
     // SMART baselines — per-device saved reference points (B key in detail)
     pub smart_baselines: HashMap<String, smart_baseline::Baseline>,
 
+    // Health score history — per-device, persisted across sessions
+    pub health_history: health_history::HealthHistory,
+
+    // Alert log viewer state (F6)
+    pub alert_log_entries: Vec<(String, crate::alerts::Alert)>,
+    pub alert_log_scroll:  usize,
+    pub alert_log_filter:  AlertLogFilter,
+
     // Filesystem usage history for fill-rate computation: mount → [(Instant, used_bytes)]
     fs_usage_history: HashMap<String, VecDeque<(Instant, u64)>>,
 
@@ -287,6 +313,10 @@ impl App {
             alert_fired_at:    HashMap::new(),
             acked_alerts:      HashSet::new(),
             smart_baselines:   HashMap::new(),
+            health_history:    health_history::load(),
+            alert_log_entries: Vec::new(),
+            alert_log_scroll:  0,
+            alert_log_filter:  AlertLogFilter::All,
             fs_usage_history:  HashMap::new(),
             should_quit:   false,
         };
@@ -348,6 +378,16 @@ impl App {
                     ActiveView::FilesystemOverview => filesystem_view::render(f, self),
                     ActiveView::VolumeManager      => volume_view::render(f, self),
                     ActiveView::NfsView            => nfs_view::render(f, self),
+                    ActiveView::AlertLog           => {
+                        use crate::ui::alert_log_view::render_alert_log_view;
+                        render_alert_log_view(
+                            f, f.area(),
+                            &self.alert_log_entries,
+                            self.alert_log_scroll,
+                            self.alert_log_filter,
+                            &theme_snap,
+                        );
+                    }
                 }
                 if show_help {
                     help::render(f, &theme_snap);
@@ -512,6 +552,17 @@ impl App {
                 };
             }
 
+            Action::ViewAlertLog => {
+                if self.active_view == ActiveView::AlertLog {
+                    self.active_view = ActiveView::Dashboard;
+                } else {
+                    self.active_view    = ActiveView::AlertLog;
+                    self.alert_log_entries = alert_log::load_all();
+                    self.alert_log_scroll  = 0;
+                    self.alert_log_filter  = AlertLogFilter::All;
+                }
+            }
+
             Action::FocusNext => {
                 if self.active_view == ActiveView::Dashboard { self.cycle_focus(1); }
             }
@@ -543,6 +594,8 @@ impl App {
                 // Dismiss benchmark popup first if showing
                 if self.bench_state != BenchmarkState::Idle {
                     self.bench_state = BenchmarkState::Idle;
+                } else if self.active_view == ActiveView::AlertLog {
+                    self.active_view = ActiveView::Dashboard;
                 } else if self.active_view != ActiveView::Dashboard {
                     self.active_view = ActiveView::Dashboard;
                 } else {
@@ -553,7 +606,10 @@ impl App {
             }
 
             Action::CycleSort => {
-                if self.active_view == ActiveView::ProcessIO {
+                if self.active_view == ActiveView::AlertLog {
+                    self.alert_log_filter = self.alert_log_filter.next();
+                    self.alert_log_scroll = 0;
+                } else if self.active_view == ActiveView::ProcessIO {
                     self.process_sort = self.process_sort.next();
                     self.sort_processes();
                 } else if self.detail_open {
@@ -660,6 +716,9 @@ impl App {
                 ActiveView::VolumeManager => {
                     self.volume_scroll = self.volume_scroll.saturating_sub(1);
                 }
+                ActiveView::AlertLog => {
+                    self.alert_log_scroll = self.alert_log_scroll.saturating_sub(1);
+                }
                 ActiveView::NfsView => {}
             },
 
@@ -683,6 +742,7 @@ impl App {
                     if cur < max { self.fs_table_state.select(Some(cur + 1)); }
                 }
                 ActiveView::VolumeManager => { self.volume_scroll += 1; }
+                ActiveView::AlertLog => { self.alert_log_scroll += 1; }
                 ActiveView::NfsView => {}
             },
 
@@ -1017,8 +1077,10 @@ impl App {
     }
 
     fn consume_smart_results(&mut self) {
+        use crate::util::health_score::health_score;
         let mut cache_dirty   = false;
         let mut anomaly_dirty = false;
+        let mut history_dirty = false;
         while let Ok(result) = self.smart_rx.try_recv() {
             self.smart_pending.remove(&result.device_name);
             if let Some(dev) = self.devices.iter_mut().find(|d| d.name == result.device_name) {
@@ -1036,6 +1098,12 @@ impl App {
                 }
                 cache_dirty = true;
             }
+            // Record health score after SMART update
+            if let Some(dev) = self.devices.iter().find(|d| d.name == result.device_name) {
+                let score = health_score(dev) as u8;
+                health_history::append(&mut self.health_history, &dev.name, score);
+                history_dirty = true;
+            }
         }
         if cache_dirty {
             let cache: smart_cache::SmartCache = self.devices.iter()
@@ -1045,6 +1113,9 @@ impl App {
         }
         if anomaly_dirty {
             smart_anomaly::save(&self.smart_anomalies);
+        }
+        if history_dirty {
+            health_history::save(&self.health_history);
         }
     }
 

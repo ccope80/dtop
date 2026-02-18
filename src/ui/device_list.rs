@@ -10,6 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState},
     Frame,
 };
+use std::collections::HashMap;
 
 fn filter_active(d: &BlockDevice, filter_label: &str) -> bool {
     match filter_label {
@@ -28,13 +29,17 @@ pub fn render_device_list(
     focused: bool,
     filter_label: &str,
     sort_label: &str,
+    health_history: &HashMap<String, Vec<u8>>,
     theme: &Theme,
 ) {
     let border_style = if focused { theme.border_focused } else { theme.border };
 
     let items: Vec<ListItem> = devices
         .iter()
-        .map(|d| device_row(d, filter_active(d, filter_label), theme))
+        .map(|d| {
+            let hist = health_history.get(&d.name).map(|v| v.as_slice());
+            device_row(d, filter_active(d, filter_label), hist, theme)
+        })
         .collect();
 
     // Build a compact title showing active filter and sort modifiers
@@ -65,13 +70,29 @@ pub fn render_device_list(
     f.render_stateful_widget(list, area, state);
 }
 
-fn device_row(d: &BlockDevice, active: bool, theme: &Theme) -> ListItem<'static> {
+const SPARKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+fn health_spark(hist: Option<&[u8]>) -> String {
+    match hist {
+        None | Some([]) => "     ".to_string(),
+        Some(v) => {
+            let n = v.len().min(5);
+            v[v.len() - n..].iter().map(|&s| {
+                SPARKS[((s as usize) * 7 / 100).min(7)]
+            }).collect::<String>()
+             + &" ".repeat(5 - n)
+        }
+    }
+}
+
+fn device_row(d: &BlockDevice, active: bool, hist: Option<&[u8]>, theme: &Theme) -> ListItem<'static> {
     // When this device doesn't match the current filter, dim the entire row.
     if !active {
         let spans = vec![
             Span::styled(format!("  {:<7}", d.name), theme.text_dim),
             Span::styled(d.dev_type.label().to_string(), theme.text_dim),
-            Span::styled("   ·".to_string(), theme.text_dim),
+            Span::styled("   ·  ".to_string(), theme.text_dim),
+            Span::styled("     ".to_string(), theme.text_dim),
             Span::styled("   ---  ".to_string(), theme.text_dim),
             Span::styled("░░░░░░░░".to_string(), theme.text_dim),
             Span::styled("  -%".to_string(), theme.text_dim),
@@ -112,11 +133,16 @@ fn device_row(d: &BlockDevice, active: bool, theme: &Theme) -> ListItem<'static>
     let read_s  = fmt_rate(d.read_bytes_per_sec);
     let write_s = fmt_rate(d.write_bytes_per_sec);
 
+    let spark = health_spark(hist);
+    let spark_style = score_style(health_score(d), theme);
+
     let spans = vec![
         Span::styled(format!("  {:<7}", d.name), theme.text),
         Span::styled(d.dev_type.label().to_string(), type_colour(d, theme)),
         Span::styled(hs_str, hs_style),
         Span::styled(dot.to_string(), dot_style),
+        Span::styled(" ".to_string(), theme.text),
+        Span::styled(spark, spark_style),
         Span::styled(" ".to_string(), theme.text),
         Span::styled(temp_str, temp_style),
         Span::styled("  ".to_string(), theme.text),

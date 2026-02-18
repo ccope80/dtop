@@ -50,6 +50,31 @@ fn parse_log_line(line: &str) -> Option<(String, Alert)> {
     }))
 }
 
+/// Load all entries from the alert log, newest first (full date+time timestamp).
+pub fn load_all() -> Vec<(String, Alert)> {
+    let path = match log_path() { Some(p) => p, None => return Vec::new() };
+    let file = match std::fs::File::open(&path) { Ok(f) => f, Err(_) => return Vec::new() };
+    let mut entries: Vec<(String, Alert)> = BufReader::new(file)
+        .lines()
+        .filter_map(|l| l.ok())
+        .filter_map(|line| parse_log_line_full(&line))
+        .collect();
+    entries.reverse(); // newest first
+    entries
+}
+
+// Full-timestamp parser: returns "YYYY-MM-DD HH:MM:SS" instead of just HH:MM:SS
+fn parse_log_line_full(line: &str) -> Option<(String, Alert)> {
+    if line.len() < 22 { return None; }
+    let ts_str   = line[0..19].to_string(); // "YYYY-MM-DD HH:MM:SS"
+    let rest     = &line[20..];
+    let severity = if rest.starts_with("[CRIT]") { Severity::Critical }
+                   else if rest.starts_with("[WARN]") { Severity::Warning }
+                   else { Severity::Info };
+    let msg = rest.get(7..).unwrap_or("").trim().to_string();
+    Some((ts_str, Alert { severity, device: None, mount: None, message: msg }))
+}
+
 /// Append a slice of new alerts to the persistent log file.
 pub fn append(alerts: &[Alert]) {
     if alerts.is_empty() { return; }

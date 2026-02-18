@@ -49,6 +49,14 @@ struct Cli {
     /// One-shot health check: exit 0=OK, 1=WARNING, 2=CRITICAL (nagios/cron compatible)
     #[arg(long)]
     check: bool,
+
+    /// Print recent alert log entries and exit
+    #[arg(long)]
+    alerts: bool,
+
+    /// Number of alert log entries to show (used with --alerts)
+    #[arg(long, default_value_t = 50)]
+    last: usize,
 }
 
 fn main() -> Result<()> {
@@ -62,6 +70,9 @@ fn main() -> Result<()> {
     }
     if cli.check {
         return run_check(!cli.no_smart);
+    }
+    if cli.alerts {
+        return run_alerts(cli.last);
     }
     if cli.daemon {
         return run_daemon(cli.interval, !cli.no_smart);
@@ -170,6 +181,26 @@ fn run_report() -> Result<()> {
     let (devices, filesystems) = report::collect_snapshot();
     let alerts = alerts::evaluate(&devices, &filesystems, &config::Config::load().alerts.thresholds);
     print!("{}", report::generate(&devices, &filesystems, &alerts));
+    Ok(())
+}
+
+fn run_alerts(n: usize) -> Result<()> {
+    use util::alert_log;
+    use alerts::Severity;
+
+    let entries = alert_log::load_recent(n);
+    if entries.is_empty() {
+        println!("No alerts in log.");
+        return Ok(());
+    }
+    for (ts, alert) in &entries {
+        let sev = match alert.severity {
+            Severity::Critical => "CRIT",
+            Severity::Warning  => "WARN",
+            Severity::Info     => "INFO",
+        };
+        println!("{} [{}] {}", ts, sev, alert.message);
+    }
     Ok(())
 }
 

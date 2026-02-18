@@ -41,6 +41,7 @@ pub fn render(f: &mut Frame, theme: &Theme) {
         key_line(theme, "  F3",  "Filesystem overview (fill rate + ETA)"),
         key_line(theme, "  F4",  "RAID / LVM / ZFS view"),
         key_line(theme, "  F5",  "NFS mount latency view"),
+        key_line(theme, "  F6",  "Alert log viewer (full history, s=filter)"),
         Line::from(""),
         key_line(theme, "Dashboard — Device list", ""),
         key_line(theme, "  Enter / click×2", "Open / close device detail"),
@@ -52,6 +53,7 @@ pub fn render(f: &mut Frame, theme: &Theme) {
         key_line(theme, "Device detail pane", ""),
         key_line(theme, "  w",  "Cycle history window (60s / 5m / 1h)"),
         key_line(theme, "  r",  "Force SMART re-poll now"),
+        key_line(theme, "  B",  "Save SMART baseline snapshot"),
         key_line(theme, "  b",  "Sequential read benchmark (256 MiB)"),
         key_line(theme, "  x",  "Schedule SMART short self-test"),
     ];

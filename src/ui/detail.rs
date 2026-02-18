@@ -6,6 +6,7 @@ use crate::util::health_score::{health_score, score_style};
 use crate::util::human::{fmt_bytes, fmt_duration_short, fmt_iops, fmt_pct, fmt_rate};
 use crate::util::smart_anomaly::{self, DeviceAnomalies};
 use crate::util::smart_baseline::Baseline;
+use chrono::Local;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
@@ -255,47 +256,69 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[F
 
     // ── SMART Baseline Δ ──────────────────────────────────────────────
     if let Some(bl) = baseline {
+        let hours_elapsed = (Local::now().timestamp() - bl.saved_at) as f64 / 3600.0;
+        let age_label = if hours_elapsed < 1.0 {
+            format!("{:.0} min ago", hours_elapsed * 60.0)
+        } else if hours_elapsed < 48.0 {
+            format!("{:.1} h ago", hours_elapsed)
+        } else {
+            format!("{:.0} d ago", hours_elapsed / 24.0)
+        };
+
         lines.push(section_header("── SMART Baseline Δ ", theme));
         lines.push(Line::from(vec![
-            Span::styled("  Saved        ", theme.text_dim),
-            Span::styled(bl.saved_date.clone(), theme.text),
+            Span::styled("  Saved           ", theme.text_dim),
+            Span::styled(format!("{}  ({})", bl.saved_date, age_label), theme.text),
         ]));
+
         // Power-on hours delta
         if let (Some(bl_poh), Some(curr_poh)) = (
             bl.power_on_hours,
             device.smart.as_ref().and_then(|s| s.power_on_hours),
         ) {
             let delta = curr_poh as i64 - bl_poh as i64;
-            let delta_str = format!("{} h → {} h  (Δ {:+})", bl_poh, curr_poh, delta);
             lines.push(Line::from(vec![
-                Span::styled("  Power On Hrs  ", theme.text_dim),
-                Span::styled(delta_str, theme.text),
+                Span::styled("  Power On Hrs    ", theme.text_dim),
+                Span::styled(
+                    format!("{} h → {} h  (Δ {:+})", bl_poh, curr_poh, delta),
+                    theme.text,
+                ),
             ]));
         }
-        // Key attributes: 5=Reallocated, 197=Pending, 198=Uncorrectable
-        for (id, label) in &[(5u32, "Reallocated"), (197u32, "Pending Sectors"), (198u32, "Uncorrectable")] {
+
+        // Key count attributes: 5=Reallocated, 197=Pending, 198=Uncorrectable
+        for &(id, label) in &[(5u32, "Reallocated"), (197u32, "Pending Scts"), (198u32, "Uncorrectable")] {
             if let Some(curr_attr) = device.smart.as_ref()
-                .and_then(|s| s.attributes.iter().find(|a| a.id == *id))
+                .and_then(|s| s.attributes.iter().find(|a| a.id == id))
             {
-                if let Some((base_raw, delta)) = bl.attr_delta(*id, curr_attr.raw_value) {
+                if let Some((base_raw, delta)) = bl.attr_delta(id, curr_attr.raw_value) {
                     let delta_style = if delta > 0 { theme.warn } else { theme.ok };
-                    let delta_str = format!(
-                        "baseline: {}  now: {}  (Δ {:+})",
-                        base_raw, curr_attr.raw_value, delta
-                    );
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("  {:<15}", label), theme.text_dim),
-                        Span::styled(delta_str, delta_style),
-                    ]));
+                    let mut spans = vec![
+                        Span::styled(format!("  {:<16}", label), theme.text_dim),
+                        Span::styled(
+                            format!("base: {}  now: {}  (Δ {:+})", base_raw, curr_attr.raw_value, delta),
+                            delta_style,
+                        ),
+                    ];
+                    // Rate-of-change prediction: only meaningful if time elapsed and delta > 0
+                    if delta > 0 && hours_elapsed > 0.5 {
+                        let rate_per_hr = delta as f64 / hours_elapsed;
+                        let proj_30d    = (rate_per_hr * 24.0 * 30.0).round() as i64;
+                        spans.push(Span::styled(
+                            format!("  → +{:.2}/hr  ~+{} in 30d", rate_per_hr, proj_30d),
+                            theme.warn,
+                        ));
+                    }
+                    lines.push(Line::from(spans));
                 }
             }
         }
+
         lines.push(Line::from(vec![
-            Span::styled("  Press B to update baseline", theme.text_dim),
+            Span::styled("  B to update baseline", theme.text_dim),
         ]));
         lines.push(Line::from(vec![]));
     } else if device.smart.is_some() {
-        // Prompt to create baseline when SMART data is available but no baseline exists
         lines.push(Line::from(vec![
             Span::styled("  No SMART baseline — press ", theme.text_dim),
             Span::styled("B", theme.ok),

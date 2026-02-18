@@ -56,6 +56,8 @@ pub fn render_footer(
             spans.push(Span::styled(format!("{}  ", preset_label), theme.footer_text));
             spans.push(Span::styled(" F5 ", theme.footer_key));
             spans.push(Span::styled("NFS  ", theme.footer_text));
+            spans.push(Span::styled(" F6 ", theme.footer_key));
+            spans.push(Span::styled("Alerts  ", theme.footer_text));
             spans.push(Span::styled(" ? ", theme.footer_key));
             spans.push(Span::styled("Help  ", theme.footer_text));
         }

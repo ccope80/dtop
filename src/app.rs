@@ -1,5 +1,6 @@
 use crate::alerts::{self, Alert};
-use crate::collectors::{diskstats, filesystem, lsblk, lvm, mdraid, nfs, process_io, smart as smart_collector, smart_cache, zfs};
+use crate::collectors::{diskstats, filesystem, lsblk, lvm, mdraid, nfs, pressure, process_io, smart as smart_collector, smart_cache, zfs};
+use crate::collectors::pressure::SystemPressure;
 use crate::util::{alert_log, health_history, smart_anomaly, smart_baseline, user_state, webhook, write_endurance};
 use crate::config::Config;
 use crate::ui::benchmark_popup;
@@ -268,6 +269,9 @@ pub struct App {
     // Per-device I/O rate history: device → (read KB/s, write KB/s)
     pub device_io_history: HashMap<String, (RingBuffer, RingBuffer)>,
 
+    // System pressure stall information (PSI)
+    pub system_pressure: Option<SystemPressure>,
+
     // Filesystem usage history for fill-rate computation: mount → [(Instant, used_bytes)]
     fs_usage_history: HashMap<String, VecDeque<(Instant, u64)>>,
 
@@ -350,6 +354,7 @@ impl App {
             fs_usage_history:    HashMap::new(),
             nfs_rtt_history:     HashMap::new(),
             device_io_history:   HashMap::new(),
+            system_pressure:     None,
             should_quit:   false,
         };
 
@@ -1073,6 +1078,9 @@ impl App {
         for (name, bps) in write_updates {
             write_endurance::update(&mut self.write_endurance, &name, bps, elapsed);
         }
+
+        // System pressure stall information
+        self.system_pressure = pressure::read_pressure();
 
         self.prev_diskstats = now_stats;
         Ok(())

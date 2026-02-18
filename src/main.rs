@@ -73,6 +73,10 @@ struct Cli {
     /// Print a one-line health summary and exit (exit 0=OK, 1=WARN, 2=CRIT)
     #[arg(long)]
     summary: bool,
+
+    /// Export current device snapshot as CSV and exit
+    #[arg(long)]
+    csv: bool,
 }
 
 fn main() -> Result<()> {
@@ -101,6 +105,9 @@ fn main() -> Result<()> {
     }
     if cli.summary {
         return run_summary(!cli.no_smart);
+    }
+    if cli.csv {
+        return run_csv(!cli.no_smart);
     }
     if cli.daemon {
         return run_daemon(cli.interval, !cli.no_smart);
@@ -444,6 +451,57 @@ fn run_summary(smart_enabled: bool) -> Result<()> {
         std::process::exit(2);
     } else if warn_n > 0 {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn run_csv(smart_enabled: bool) -> Result<()> {
+    use collectors::smart as smart_collector;
+    use models::device::BlockDevice;
+    use util::human::fmt_bytes;
+    use util::health_score::health_score;
+
+    let cfg = config::Config::load();
+    let lsblk_devs = collectors::lsblk::run_lsblk().unwrap_or_default();
+    let raw_stats  = collectors::diskstats::read_diskstats().unwrap_or_default();
+
+    let devices: Vec<BlockDevice> = lsblk_devs.iter()
+        .filter(|lb| !cfg.devices.exclude.iter().any(|pat| {
+            if let Some(p) = pat.strip_suffix('*') { lb.name.starts_with(p) }
+            else { pat == &lb.name }
+        }))
+        .filter(|lb| raw_stats.contains_key(&lb.name))
+        .map(|lb| {
+            let mut dev = BlockDevice::new(lb.name.clone());
+            dev.model = lb.model.clone(); dev.serial = lb.serial.clone();
+            dev.capacity_bytes = lb.size; dev.rotational = lb.rotational;
+            dev.transport = lb.transport.clone(); dev.partitions = lb.partitions.clone();
+            dev.infer_type();
+            if smart_enabled { dev.smart = smart_collector::poll_device(&lb.name); }
+            dev
+        })
+        .collect();
+
+    println!("name,model,serial,type,capacity_bytes,capacity_hr,rotational,\
+              read_bps,write_bps,util_pct,temp_c,smart_status,health_score");
+    for dev in &devices {
+        let model      = dev.model.as_deref().unwrap_or("").replace(',', ";");
+        let serial     = dev.serial.as_deref().unwrap_or("").replace(',', ";");
+        let smart_s    = dev.smart.as_ref().map(|s| s.status.label().trim().to_string())
+                             .unwrap_or_else(|| "UNKNOWN".to_string());
+        let temp       = dev.temperature().map(|t| t.to_string()).unwrap_or_default();
+        let cap_hr     = fmt_bytes(dev.capacity_bytes);
+        println!(
+            "{},{},{},{},{},{},{},{:.0},{:.0},{:.1},{},{},{}",
+            dev.name, model, serial,
+            dev.dev_type.label().trim(),
+            dev.capacity_bytes, cap_hr,
+            dev.rotational,
+            dev.read_bytes_per_sec, dev.write_bytes_per_sec,
+            dev.io_util_pct,
+            temp, smart_s,
+            health_score(&dev),
+        );
     }
     Ok(())
 }

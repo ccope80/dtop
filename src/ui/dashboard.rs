@@ -101,6 +101,25 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if crit_n > 0 { fleet_spans.push(Span::styled(format!("{}●", crit_n), theme.crit)); fleet_spans.push(Span::styled(" ", theme.text_dim)); }
     fleet_spans.push(Span::styled(avg_suffix, avg_style));
 
+    // PSI I/O pressure (appended if available)
+    if let Some(psi) = &app.system_pressure {
+        let some = psi.io.some.avg10;
+        let full = psi.io.full.avg10;
+        let psi_style = if some >= 50.0 || full >= 20.0 { theme.crit }
+                        else if some >= 20.0 || full >= 5.0  { theme.warn }
+                        else { theme.text_dim };
+        fleet_spans.push(Span::styled(
+            format!("   io psi: {:.1}% ", some),
+            psi_style,
+        ));
+        if full > 0.1 {
+            fleet_spans.push(Span::styled(
+                format!("full:{:.1}% ", full),
+                theme.crit,
+            ));
+        }
+    }
+
     let header_line2 = Line::from(fleet_spans);
 
     f.render_widget(

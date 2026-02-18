@@ -1,4 +1,5 @@
 pub mod diskstats;
+pub mod pressure;
 pub mod filesystem;
 pub mod lsblk;
 pub mod lvm;

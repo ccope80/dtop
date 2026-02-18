@@ -260,6 +260,34 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[F
                 Span::styled(format!("  {}% used, {}% remaining", used_pct, remain), endurance_style),
             ]));
             lines.push(kv("Data Written", &fmt_bytes(nvme.bytes_written()), theme));
+
+            // Wear rate + life projection from power-on hours
+            let poh = nvme.power_on_hours;
+            if poh > 24 && used_pct > 0 {
+                let days_active   = poh as f64 / 24.0;
+                let daily_rate    = used_pct as f64 / days_active; // %/day
+                let remain_pct    = (100usize.saturating_sub(used_pct)) as f64;
+                let days_left     = remain_pct / daily_rate;
+                let years_left    = days_left / 365.25;
+                let rate_style    = if daily_rate >= 0.1 { theme.warn } else { theme.ok };
+                lines.push(Line::from(vec![
+                    Span::styled("  Wear Rate       ", theme.text_dim),
+                    Span::styled(format!("{:.4}%/day", daily_rate), rate_style),
+                    Span::styled(format!("  ({:.0}h POH)", poh), theme.text_dim),
+                ]));
+                let life_style = if days_left < 180.0 { theme.crit }
+                                 else if days_left < 730.0 { theme.warn }
+                                 else { theme.ok };
+                lines.push(Line::from(vec![
+                    Span::styled("  Est Life Left   ", theme.text_dim),
+                    Span::styled(
+                        format!("~{:.0} days  ({:.1} years)", days_left, years_left),
+                        life_style,
+                    ),
+                ]));
+            } else if poh > 0 && used_pct == 0 {
+                lines.push(kv("Wear Rate", "< 1%  (minimal use)", theme));
+            }
             lines.push(Line::from(vec![]));
         } else if let Some(poh) = smart.power_on_hours {
             // HDD/SSD: power-on hours vs ~50k hour lifespan estimate

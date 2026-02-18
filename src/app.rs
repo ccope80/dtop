@@ -866,24 +866,65 @@ impl App {
             },
 
             Action::JumpTop => {
-                if self.active_panel == ActivePanel::Devices && !self.detail_open {
-                    let first = if self.device_filter != DeviceFilter::All {
-                        self.filtered_device_indices().into_iter().next()
-                    } else {
-                        if !self.devices.is_empty() { Some(0) } else { None }
-                    };
-                    self.device_list_state.select(first);
+                match self.active_view {
+                    ActiveView::Dashboard => {
+                        if self.active_panel == ActivePanel::Devices && !self.detail_open {
+                            let first = if self.device_filter != DeviceFilter::All {
+                                self.filtered_device_indices().into_iter().next()
+                            } else {
+                                if !self.devices.is_empty() { Some(0) } else { None }
+                            };
+                            self.device_list_state.select(first);
+                        }
+                    }
+                    ActiveView::ProcessIO => {
+                        if !self.process_io.is_empty() { self.process_table_state.select(Some(0)); }
+                    }
+                    ActiveView::FilesystemOverview => {
+                        if !self.filesystems.is_empty() { self.fs_table_state.select(Some(0)); }
+                    }
+                    ActiveView::VolumeManager => { self.volume_scroll = 0; }
+                    ActiveView::NfsView => {
+                        if !self.nfs_mounts.is_empty() { self.nfs_table_state.select(Some(0)); }
+                    }
+                    ActiveView::AlertLog => { self.alert_log_scroll = 0; }
                 }
             }
 
             Action::JumpBottom => {
-                if self.active_panel == ActivePanel::Devices && !self.detail_open {
-                    let last = if self.device_filter != DeviceFilter::All {
-                        self.filtered_device_indices().into_iter().last()
-                    } else {
-                        if !self.devices.is_empty() { Some(self.devices.len() - 1) } else { None }
-                    };
-                    self.device_list_state.select(last);
+                match self.active_view {
+                    ActiveView::Dashboard => {
+                        if self.active_panel == ActivePanel::Devices && !self.detail_open {
+                            let last = if self.device_filter != DeviceFilter::All {
+                                self.filtered_device_indices().into_iter().last()
+                            } else {
+                                let n = self.devices.len();
+                                if n > 0 { Some(n - 1) } else { None }
+                            };
+                            self.device_list_state.select(last);
+                        }
+                    }
+                    ActiveView::ProcessIO => {
+                        let n = self.process_io.len();
+                        if n > 0 { self.process_table_state.select(Some(n - 1)); }
+                    }
+                    ActiveView::FilesystemOverview => {
+                        let n = self.filesystems.len();
+                        if n > 0 { self.fs_table_state.select(Some(n - 1)); }
+                    }
+                    ActiveView::VolumeManager => {
+                        self.volume_scroll = self.raid_arrays.len()
+                            .saturating_add(self.lvm_state.as_ref().map_or(0, |l| l.lvs.len()))
+                            .saturating_add(self.zfs_pools.len())
+                            .saturating_sub(1);
+                    }
+                    ActiveView::NfsView => {
+                        let n = self.nfs_mounts.len();
+                        if n > 0 { self.nfs_table_state.select(Some(n - 1)); }
+                    }
+                    ActiveView::AlertLog => {
+                        self.alert_log_scroll = self.alert_log_entries.len().saturating_sub(1);
+                    }
                 }
             }
 

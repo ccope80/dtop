@@ -261,6 +261,14 @@ struct Cli {
     /// Show top directories by disk usage under PATH (default: current directory)
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
     du: Option<String>,
+
+    /// View or set the filesystem label for DEVICE; omit LABEL to print current
+    #[arg(long, value_name = "DEVICE[=LABEL]")]
+    label: Option<String>,
+
+    /// Print current temperature for all devices from SMART cache (no polling)
+    #[arg(long)]
+    disk_temps: bool,
 }
 
 fn main() -> Result<()> {
@@ -386,6 +394,12 @@ fn main() -> Result<()> {
     }
     if let Some(path) = &cli.du {
         return run_du(path);
+    }
+    if let Some(arg) = &cli.label {
+        return run_label(arg);
+    }
+    if cli.disk_temps {
+        return run_disk_temps();
     }
     if cli.config {
         return run_print_config();
@@ -3373,4 +3387,96 @@ fn parse_du_size(s: &str) -> u64 {
         'T' => (n * 1_099_511_627_776.0) as u64,
         _   => s.parse().unwrap_or(0),
     }
+}
+
+fn run_label(arg: &str) -> Result<()> {
+    // Accept "DEV" (view) or "DEV=LABEL" (set)
+    let (dev_raw, new_label) = if let Some((d, l)) = arg.split_once('=') {
+        (d, Some(l))
+    } else {
+        (arg, None)
+    };
+    let name     = dev_raw.trim_start_matches("/dev/");
+    let dev_path = format!("/dev/{}", name);
+
+    // Detect filesystem type via blkid
+    let blkid_out = std::process::Command::new("blkid")
+        .args(["-o", "value", "-s", "TYPE", &dev_path])
+        .output()
+        .map_err(|e| anyhow::anyhow!("blkid failed: {}", e))?;
+    let fstype = String::from_utf8_lossy(&blkid_out.stdout).trim().to_string();
+
+    if let Some(label) = new_label {
+        // Set label
+        let result = match fstype.as_str() {
+            "ext2" | "ext3" | "ext4" => std::process::Command::new("e2label")
+                .args([&dev_path, label])
+                .status(),
+            "xfs" => std::process::Command::new("xfs_admin")
+                .args(["-L", label, &dev_path])
+                .status(),
+            "btrfs" => std::process::Command::new("btrfs")
+                .args(["filesystem", "label", &dev_path, label])
+                .status(),
+            "ntfs" => std::process::Command::new("ntfslabel")
+                .args([&dev_path, label])
+                .status(),
+            "vfat" | "fat32" | "fat16" => std::process::Command::new("fatlabel")
+                .args([&dev_path, label])
+                .status(),
+            _ => {
+                anyhow::bail!("Unsupported filesystem type '{}' for label set (detected on {})", fstype, dev_path);
+            }
+        };
+        match result {
+            Ok(s) if s.success() => println!("Label set to '{}' on {} ({})", label, dev_path, fstype),
+            Ok(s) => anyhow::bail!("Label command exited {}", s),
+            Err(e) => anyhow::bail!("Failed to run label tool: {}", e),
+        }
+    } else {
+        // View label
+        let blkid_label = std::process::Command::new("blkid")
+            .args(["-o", "value", "-s", "LABEL", &dev_path])
+            .output()
+            .map_err(|e| anyhow::anyhow!("blkid failed: {}", e))?;
+        let label = String::from_utf8_lossy(&blkid_label.stdout).trim().to_string();
+        println!("Device  : {}", dev_path);
+        println!("FS type : {}", if fstype.is_empty() { "unknown" } else { &fstype });
+        println!("Label   : {}", if label.is_empty() { "(none)" } else { &label });
+    }
+    Ok(())
+}
+
+fn run_disk_temps() -> Result<()> {
+    use crate::collectors::smart_cache;
+
+    let cache = smart_cache::load();
+    if cache.is_empty() {
+        println!("No SMART data cached yet — run dtop (TUI) first to populate the cache.");
+        return Ok(());
+    }
+
+    // Collect devices with temperature data, sorted hottest first
+    let mut rows: Vec<(String, i32)> = cache.iter()
+        .filter_map(|(name, data)| data.temperature.map(|t| (name.clone(), t)))
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+
+    println!("{:<12} {:>7}  Gauge", "Device", "Temp");
+    println!("{}", "─".repeat(40));
+
+    const BAR_W: usize = 20;
+    for (name, temp) in &rows {
+        // Gauge: 20-85°C range maps to full bar
+        let pct  = ((*temp as f64 - 20.0) / 65.0).clamp(0.0, 1.0);
+        let fill = (pct * BAR_W as f64).round() as usize;
+        let bar  = format!("{}{}", "█".repeat(fill.min(BAR_W)), "░".repeat(BAR_W - fill.min(BAR_W)));
+        let indicator = if *temp >= 70 { "▲ HOT" } else if *temp >= 55 { "  warm" } else { "  ok" };
+        println!("{:<12} {:>5}°C  {}  {}", name, temp, bar, indicator);
+    }
+
+    if rows.is_empty() {
+        println!("  No temperature data in SMART cache.");
+    }
+    Ok(())
 }

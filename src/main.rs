@@ -102,8 +102,8 @@ struct Cli {
     #[arg(long)]
     top_io: bool,
 
-    /// Row/sample limit: processes for --top-io, iterations for --iostat (0 = loop, default 10)
-    #[arg(long, default_value_t = 10)]
+    /// Row/sample limit: processes for --top-io, iterations for --iostat (0 = loop forever, default 0)
+    #[arg(long, default_value_t = 0)]
     count: usize,
 
     /// Print a detailed per-device SMART report and exit
@@ -427,7 +427,7 @@ fn main() -> Result<()> {
     }
     if let Some(dev_or_all) = &cli.iostat {
         let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
-        return run_iostat(dev, cli.count);
+        return run_iostat(dev, cli.count, cli.interval);
     }
     if cli.capacity {
         return run_capacity();
@@ -1735,7 +1735,7 @@ fn run_top_io(count: usize) -> Result<()> {
         return Ok(());
     }
 
-    let n = count.min(rates.len());
+    let n = if count == 0 { rates.len() } else { count.min(rates.len()) };
     println!("{:>7}  {:<16}  {:<12}  {:>10}  {:>10}  {:>10}",
         "PID", "COMMAND", "USER", "READ/s", "WRITE/s", "TOTAL/s");
     println!("{}", "─".repeat(73));
@@ -2581,29 +2581,33 @@ fn run_forecast() -> Result<()> {
 
 // ── --iostat ──────────────────────────────────────────────────────────────────
 
-fn run_iostat(device: Option<&str>, count: usize) -> Result<()> {
+fn run_iostat(device: Option<&str>, count: usize, interval_ms: u64) -> Result<()> {
     use collectors::diskstats;
-    use util::human::fmt_bytes;
 
     let loop_forever = count == 0;
+    let interval_secs = (interval_ms as f64 / 1000.0).max(0.1);
+    let interval_dur  = std::time::Duration::from_millis(interval_ms.max(100));
+
     let dev_filter = device.map(|d| d.trim_start_matches("/dev/").to_string());
 
-    println!("{:<10}  {:>9}  {:>9}  {:>7}  {:>7}  {:>6}  {:>9}  {:>9}",
-        "Device", "Read/s", "Write/s", "rIOPS", "wIOPS", "Util%", "rLat(ms)", "wLat(ms)");
-    println!("{}", "─".repeat(80));
+    // Header: Ctrl-C exits cleanly via normal SIGINT process termination
+    println!("{:<15}  {:>8}  {:>8}  {:>8}  {:>8}  {:>7}",
+        "Device", "r/s", "w/s", "rMB/s", "wMB/s", "util%");
+    println!("{}", "─".repeat(65));
 
     let mut prev = diskstats::read_diskstats()?;
     let mut t0 = std::time::Instant::now();
     let mut iteration = 0usize;
 
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(interval_dur);
+
         let curr = diskstats::read_diskstats()?;
-        let elapsed = t0.elapsed().as_secs_f64();
+        let elapsed = t0.elapsed().as_secs_f64().max(interval_secs * 0.5);
         t0 = std::time::Instant::now();
 
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!("── {} ─────────────────────────────────────────────────────────────────", ts);
+        println!("── {} ──────────────────────────────────────────────────────", ts);
 
         let mut dev_names: Vec<String> = curr.keys().cloned().collect();
         dev_names.sort();
@@ -2614,15 +2618,15 @@ fn run_iostat(device: Option<&str>, count: usize) -> Result<()> {
             }
             if let (Some(p), Some(c)) = (prev.get(dev), curr.get(dev)) {
                 let io = diskstats::compute_io(p, c, elapsed, 0);
-                println!("{:<10}  {:>9}  {:>9}  {:>7.0}  {:>7.0}  {:>5.1}%  {:>9.2}  {:>9.2}",
+                let rmb = io.read_bytes_per_sec  / (1024.0 * 1024.0);
+                let wmb = io.write_bytes_per_sec / (1024.0 * 1024.0);
+                println!("{:<15}  {:>8.1}  {:>8.1}  {:>8.2}  {:>8.2}  {:>6.1}%",
                     dev,
-                    fmt_bytes(io.read_bytes_per_sec as u64),
-                    fmt_bytes(io.write_bytes_per_sec as u64),
                     io.read_iops,
                     io.write_iops,
+                    rmb,
+                    wmb,
                     io.io_util_pct,
-                    io.avg_read_latency_ms,
-                    io.avg_write_latency_ms,
                 );
             }
         }

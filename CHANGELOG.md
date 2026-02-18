@@ -9,6 +9,9 @@ All notable changes to dtop are documented here.
 ### Fixed
 - Help overlay and man page now show correct syntax for `--report-html` and `--report-md`: use `--output FILE` rather than a positional argument
 
+### Docs
+- README rewritten: ASCII TUI preview, corrected CLI examples, fixed systemd setup instructions, removed broken links
+
 ## [0.1.1] — 2026-02-18
 
 ### Fixed

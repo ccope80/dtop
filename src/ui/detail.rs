@@ -1,6 +1,7 @@
 use crate::models::device::BlockDevice;
 use crate::models::smart::{SmartData, SmartStatus};
 use crate::ui::theme::Theme;
+use crate::util::health_score::{health_score, score_style};
 use crate::util::human::{fmt_bytes, fmt_iops, fmt_pct, fmt_rate};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -166,6 +167,19 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, s
     lines.push(kv("Capacity",  &fmt_bytes(device.capacity_bytes), theme));
     if let Some(s) = &device.serial   { lines.push(kv("Serial",    s, theme)); }
     if let Some(t) = &device.transport { lines.push(kv("Transport", &t.to_uppercase(), theme)); }
+
+    // Health score
+    let (hs_str, hs_style) = if device.smart.is_some() {
+        let s = health_score(device);
+        let style = score_style(s, theme);
+        let label = if s >= 80 { format!("{}/100  ✓", s) }
+                    else if s >= 50 { format!("{}/100  !", s) }
+                    else { format!("{}/100  ✗", s) };
+        (label, style)
+    } else {
+        ("—  (no SMART data yet)".to_string(), theme.text_dim)
+    };
+    lines.push(kv_colored("Health Score", &hs_str, hs_style, theme));
     lines.push(Line::from(vec![]));
 
     // ── Drive endurance / lifespan estimate ───────────────────────────
@@ -365,5 +379,12 @@ fn kv(key: &str, val: &str, theme: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("  {:<18}", key), theme.text_dim),
         Span::styled(val.to_string(), theme.text),
+    ])
+}
+
+fn kv_colored(key: &str, val: &str, val_style: ratatui::style::Style, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("  {:<18}", key), theme.text_dim),
+        Span::styled(val.to_string(), val_style),
     ])
 }

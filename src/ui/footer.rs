@@ -20,7 +20,7 @@ pub fn render_footer(
     let base: &[(&str, &str)] = match panel {
         ActivePanel::Devices => &[
             ("q", "Quit"), ("Tab", "Focus"), ("↑↓/jk", "Select"),
-            ("Enter/l", "Detail"), ("t", "Theme"), ("p", "Preset"),
+            ("Enter/l", "Detail"), ("s", "Sort"), ("f", "Filter"), ("t", "Theme"),
         ],
         ActivePanel::Throughput => &[
             ("q", "Quit"), ("Tab", "Focus"), ("t", "Theme"),

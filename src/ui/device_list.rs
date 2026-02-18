@@ -1,6 +1,7 @@
 use crate::models::device::{BlockDevice, DeviceType};
 use crate::models::smart::SmartStatus;
 use crate::ui::theme::Theme;
+use crate::util::health_score::{health_score, score_style, score_str};
 use crate::util::human::fmt_rate;
 use ratatui::{
     layout::Rect,
@@ -26,6 +27,7 @@ pub fn render_device_list(
     state: &mut ListState,
     focused: bool,
     filter_label: &str,
+    sort_label: &str,
     theme: &Theme,
 ) {
     let border_style = if focused { theme.border_focused } else { theme.border };
@@ -35,11 +37,20 @@ pub fn render_device_list(
         .map(|d| device_row(d, filter_active(d, filter_label), theme))
         .collect();
 
-    let title = if filter_label == "All" {
-        format!("1 Devices  ({} total)", devices.len())
+    // Build a compact title showing active filter and sort modifiers
+    let active_count = if filter_label == "All" {
+        devices.len()
     } else {
-        format!("1 Devices  [f: {}]  ({} shown)", filter_label, devices.len())
+        devices.iter().filter(|d| filter_active(d, filter_label)).count()
     };
+    let count_word = if filter_label == "All" { "total" } else { "shown" };
+    let mut title = format!("1 Devices  ({} {})", active_count, count_word);
+    if filter_label != "All" {
+        title = format!("1 Devices  [f:{}]  ({} shown)", filter_label, active_count);
+    }
+    if sort_label != "Natural" {
+        title = format!("{}  [s:{}]", title, sort_label);
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -59,14 +70,19 @@ fn device_row(d: &BlockDevice, active: bool, theme: &Theme) -> ListItem<'static>
     if !active {
         let spans = vec![
             Span::styled(format!("  {:<7}", d.name), theme.text_dim),
-            Span::styled(format!("{} ", d.dev_type.label()), theme.text_dim),
-            Span::styled("·".to_string(), theme.text_dim),
-            Span::styled(format!("  ---  ", ), theme.text_dim),
+            Span::styled(d.dev_type.label().to_string(), theme.text_dim),
+            Span::styled("   ·".to_string(), theme.text_dim),
+            Span::styled("   ---  ".to_string(), theme.text_dim),
             Span::styled("░░░░░░░░".to_string(), theme.text_dim),
             Span::styled("  -%".to_string(), theme.text_dim),
         ];
         return ListItem::new(Line::from(spans));
     }
+
+    // Health score badge (3 chars + space)
+    let s = health_score(d);
+    let hs_str   = score_str(d);
+    let hs_style = score_style(s, theme);
 
     // Health indicator dot
     let (dot, dot_style) = match d.smart_status() {
@@ -98,7 +114,8 @@ fn device_row(d: &BlockDevice, active: bool, theme: &Theme) -> ListItem<'static>
 
     let spans = vec![
         Span::styled(format!("  {:<7}", d.name), theme.text),
-        Span::styled(format!("{} ", d.dev_type.label()), type_colour(d, theme)),
+        Span::styled(d.dev_type.label().to_string(), type_colour(d, theme)),
+        Span::styled(hs_str, hs_style),
         Span::styled(dot.to_string(), dot_style),
         Span::styled(" ".to_string(), theme.text),
         Span::styled(temp_str, temp_style),

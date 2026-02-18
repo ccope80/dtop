@@ -50,6 +50,33 @@ impl DeviceFilter {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum DeviceSort {
+    Natural,  // type order + name (default)
+    Util,     // I/O utilisation % descending
+    Temp,     // temperature descending
+    Health,   // health score ascending (sickest first)
+}
+
+impl DeviceSort {
+    pub fn next(&self) -> Self {
+        match self {
+            DeviceSort::Natural => DeviceSort::Util,
+            DeviceSort::Util    => DeviceSort::Temp,
+            DeviceSort::Temp    => DeviceSort::Health,
+            DeviceSort::Health  => DeviceSort::Natural,
+        }
+    }
+    pub fn label(&self) -> &'static str {
+        match self {
+            DeviceSort::Natural => "Natural",
+            DeviceSort::Util    => "Util↓",
+            DeviceSort::Temp    => "Temp↓",
+            DeviceSort::Health  => "Health↑",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum ActiveView {
     Dashboard,
     ProcessIO,
@@ -111,14 +138,18 @@ pub struct App {
     // Help overlay
     pub show_help: bool,
 
-    // Device list filter (f key)
+    // Device list filter (f key) and sort (s key)
     pub device_filter: DeviceFilter,
+    pub device_sort:   DeviceSort,
 
     // Tick interval (wired from --interval)
     fast_tick: Duration,
 
     // SMART enabled (wired from --no-smart)
     smart_enabled: bool,
+
+    // Config hot-reload: last known mtime of dtop.toml
+    config_mtime: Option<std::time::SystemTime>,
 
     // Dashboard state
     pub device_list_state: ListState,
@@ -199,8 +230,10 @@ impl App {
             layout_preset: 0,
             show_help:     false,
             device_filter: DeviceFilter::All,
+            device_sort:   DeviceSort::Natural,
             fast_tick:     Duration::from_millis(interval_ms.max(500)),
             smart_enabled,
+            config_mtime:  None,
             device_list_state:     ListState::default(),
             device_list_area:      None,
             detail_open:           false,
@@ -325,6 +358,7 @@ impl App {
 
             if self.last_slow_tick.elapsed() >= SLOW_TICK {
                 self.collect_slow()?;
+                self.sort_devices();
                 self.last_slow_tick = Instant::now();
             }
 
@@ -476,11 +510,18 @@ impl App {
                     self.process_sort = self.process_sort.next();
                     self.sort_processes();
                 } else if self.detail_open {
+                    // s in detail view → trigger SMART refresh
                     if let Some(idx) = self.device_list_state.selected() {
                         if let Some(dev) = self.devices.get(idx) {
                             self.schedule_smart(&dev.name.clone());
                         }
                     }
+                } else if self.active_view == ActiveView::Dashboard
+                    && self.active_panel == ActivePanel::Devices
+                {
+                    // s on device list → cycle sort order
+                    self.device_sort = self.device_sort.next();
+                    self.sort_devices();
                 }
             }
 
@@ -602,9 +643,25 @@ impl App {
 
     fn select_delta(&mut self, delta: i32) {
         if self.devices.is_empty() { return; }
-        let cur  = self.device_list_state.selected().unwrap_or(0) as i32;
-        let next = (cur + delta).clamp(0, self.devices.len() as i32 - 1) as usize;
-        self.device_list_state.select(Some(next));
+
+        // When a filter is active, skip over non-matching (dimmed) rows.
+        if self.device_filter != DeviceFilter::All {
+            let indices = self.filtered_device_indices();
+            if indices.is_empty() { return; }
+            let cur = self.device_list_state.selected().unwrap_or(0);
+            let new_idx = if delta > 0 {
+                indices.iter().find(|&&i| i > cur).copied()
+                    .unwrap_or(*indices.last().unwrap())
+            } else {
+                indices.iter().rev().find(|&&i| i < cur).copied()
+                    .unwrap_or(*indices.first().unwrap())
+            };
+            self.device_list_state.select(Some(new_idx));
+        } else {
+            let cur  = self.device_list_state.selected().unwrap_or(0) as i32;
+            let next = (cur + delta).clamp(0, self.devices.len() as i32 - 1) as usize;
+            self.device_list_state.select(Some(next));
+        }
     }
 
     /// Indices into self.devices that match the current device_filter.
@@ -625,6 +682,45 @@ impl App {
     pub fn filtered_devices(&self) -> Vec<&crate::models::device::BlockDevice> {
         let idxs = self.filtered_device_indices();
         idxs.iter().map(|&i| &self.devices[i]).collect()
+    }
+
+    /// Re-sort self.devices according to self.device_sort.
+    /// Preserves the selection by device name.
+    pub fn sort_devices(&mut self) {
+        use crate::util::health_score::health_score;
+        use std::cmp::Ordering;
+
+        let selected_name = self.device_list_state.selected()
+            .and_then(|i| self.devices.get(i))
+            .map(|d| d.name.clone());
+
+        let sort = self.device_sort.clone();
+        self.devices.sort_by(|a, b| match sort {
+            DeviceSort::Natural => {
+                type_order(&a.dev_type).cmp(&type_order(&b.dev_type))
+                    .then(a.name.cmp(&b.name))
+            }
+            DeviceSort::Util => {
+                b.io_util_pct.partial_cmp(&a.io_util_pct)
+                    .unwrap_or(Ordering::Equal)
+            }
+            DeviceSort::Temp => {
+                let ta = a.temperature().unwrap_or(-999);
+                let tb = b.temperature().unwrap_or(-999);
+                tb.cmp(&ta)
+            }
+            DeviceSort::Health => {
+                // Sickest first (lowest score)
+                health_score(a).cmp(&health_score(b))
+            }
+        });
+
+        // Restore selection by name
+        if let Some(name) = selected_name {
+            if let Some(pos) = self.devices.iter().position(|d| d.name == name) {
+                self.device_list_state.select(Some(pos));
+            }
+        }
     }
 
     // ── Fast data collection (2 s) ────────────────────────────────────
@@ -688,6 +784,19 @@ impl App {
     // ── Slow data collection (30 s) ───────────────────────────────────
 
     fn collect_slow(&mut self) -> Result<()> {
+        // Config hot-reload: detect mtime changes and reload dtop.toml
+        if let Some(path) = Config::config_path() {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if let Ok(mtime) = meta.modified() {
+                    let reload = self.config_mtime.map_or(true, |prev| mtime > prev);
+                    if reload {
+                        self.config       = Config::load();
+                        self.config_mtime = Some(mtime);
+                    }
+                }
+            }
+        }
+
         let lsblk_devs = lsblk::run_lsblk().unwrap_or_default();
         let raw        = diskstats::read_diskstats().unwrap_or_default();
         let mut new_devices: Vec<BlockDevice> = Vec::new();
@@ -716,6 +825,7 @@ impl App {
             new_devices.push(dev);
         }
 
+        // Initial natural sort; sort_devices() re-applies the user's chosen order after.
         new_devices.sort_by(|a, b| {
             type_order(&a.dev_type).cmp(&type_order(&b.dev_type)).then(a.name.cmp(&b.name))
         });

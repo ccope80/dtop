@@ -333,6 +333,10 @@ struct Cli {
     /// Install dtop binary, man page, and shell completions to /usr/local
     #[arg(long)]
     install: bool,
+
+    /// Print detailed version and build information
+    #[arg(long)]
+    version_info: bool,
 }
 
 fn main() -> Result<()> {
@@ -518,6 +522,9 @@ fn main() -> Result<()> {
     }
     if cli.install {
         return run_install();
+    }
+    if cli.version_info {
+        return run_version_info();
     }
     if cli.config {
         return run_print_config();
@@ -4969,5 +4976,40 @@ fn run_install() -> Result<()> {
     println!("   Binary:     /usr/local/bin/dtop");
     println!("   Man page:   /usr/local/share/man/man1/dtop.1");
     println!("   Try: dtop --help   or   man dtop");
+    Ok(())
+}
+
+fn run_version_info() -> Result<()> {
+    println!("dtop  v{}", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("  Build profile : {}", if cfg!(debug_assertions) { "debug" } else { "release" });
+    println!("  Rust edition  : 2021");
+    println!("  Target OS     : {}", std::env::consts::OS);
+    println!("  Architecture  : {}", std::env::consts::ARCH);
+    println!();
+    println!("  Binary        : {}", std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string()));
+    println!();
+    println!("  Data dir      : {}",
+        dirs::data_local_dir()
+            .map(|p| p.join("dtop").display().to_string())
+            .unwrap_or_else(|| "~/.local/share/dtop".to_string()));
+    println!("  Config dir    : {}",
+        dirs::config_dir()
+            .map(|p| p.join("dtop").display().to_string())
+            .unwrap_or_else(|| "~/.config/dtop".to_string()));
+    println!();
+
+    // Check for external tool availability
+    println!("  External tools:");
+    for tool in &["smartctl", "hdparm", "nvme", "lsblk", "blkid", "fstrim", "btrfs", "zpool"] {
+        let found = std::process::Command::new("which")
+            .arg(tool)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        println!("    {:<12} {}", tool, if found { "✓ found" } else { "✗ not found" });
+    }
     Ok(())
 }

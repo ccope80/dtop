@@ -286,6 +286,10 @@ pub struct App {
     fs_usage_history: HashMap<String, VecDeque<(Instant, u64)>>,
 
     pub should_quit: bool,
+
+    // Uptime + poll counter for status line
+    pub start_time:       Instant,
+    pub smart_poll_count: u64,
 }
 
 impl App {
@@ -372,6 +376,8 @@ impl App {
             device_io_history:   HashMap::new(),
             system_pressure:     None,
             should_quit:   false,
+            start_time:       Instant::now(),
+            smart_poll_count: 0,
         };
 
         app.collect_slow()?;
@@ -510,6 +516,7 @@ impl App {
             }
 
             if self.smart_enabled && self.last_smart_tick.elapsed() >= SMART_TICK {
+                self.smart_poll_count += 1;
                 self.schedule_all_smart();
                 self.last_smart_tick = Instant::now();
             }

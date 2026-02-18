@@ -132,6 +132,17 @@ pub fn render(f: &mut Frame, app: &mut App) {
         }
     }
 
+    // Uptime + poll counter (right-aligned hint)
+    let uptime_secs = app.start_time.elapsed().as_secs();
+    let uptime_str  = if uptime_secs < 3600 {
+        format!("  up {}m{}s", uptime_secs / 60, uptime_secs % 60)
+    } else {
+        format!("  up {}h{}m", uptime_secs / 3600, (uptime_secs % 3600) / 60)
+    };
+    let poll_str = format!("  polls: {}  ", app.smart_poll_count);
+    fleet_spans.push(Span::styled(uptime_str, theme.text_dim));
+    fleet_spans.push(Span::styled(poll_str, theme.text_dim));
+
     let header_line2 = Line::from(fleet_spans);
 
     f.render_widget(

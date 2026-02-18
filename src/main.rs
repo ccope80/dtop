@@ -285,6 +285,14 @@ struct Cli {
     /// Print redundancy status: which devices are in RAID/ZFS, which are bare
     #[arg(long)]
     redundancy: bool,
+
+    /// Show TRIM/discard support and status for all SSDs and NVMe devices
+    #[arg(long)]
+    trim_report: bool,
+
+    /// Print I/O pressure stall info (PSI) and per-device I/O wait stats
+    #[arg(long)]
+    io_pressure: bool,
 }
 
 fn main() -> Result<()> {
@@ -430,6 +438,12 @@ fn main() -> Result<()> {
     }
     if cli.redundancy {
         return run_redundancy();
+    }
+    if cli.trim_report {
+        return run_trim_report();
+    }
+    if cli.io_pressure {
+        return run_io_pressure();
     }
     if cli.config {
         return run_print_config();
@@ -3854,6 +3868,155 @@ fn run_redundancy() -> Result<()> {
         };
 
         println!("{:<14}  {:<12}  {:<20}  {}", dev, redundancy, array, state_display);
+    }
+    Ok(())
+}
+
+fn run_trim_report() -> Result<()> {
+    // Gather block devices from sysfs
+    let mut devs: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/sys/block") {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("zram") { continue; }
+            devs.push(name);
+        }
+    }
+    devs.sort();
+
+    let mounts_text = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+
+    println!("{:<10}  {:<8}  {:<10}  {:<10}  {:<10}  Notes",
+             "Device", "Rotational", "TRIM Supp", "Discard", "Last fstrim");
+    println!("{}", "─".repeat(74));
+
+    for dev in &devs {
+        // Skip partitions (contain a digit after letters, e.g. sda1, nvme0n1p1)
+        if dev.chars().last().map_or(false, |c| c.is_ascii_digit()) { continue; }
+
+        let sysfs = format!("/sys/block/{}", dev);
+        let rotational = std::fs::read_to_string(format!("{}/queue/rotational", sysfs))
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false);
+
+        // Only report on SSDs/NVMe
+        if rotational { continue; }
+
+        // TRIM support: discard_max_bytes > 0
+        let discard_max: u64 = std::fs::read_to_string(format!("{}/queue/discard_max_bytes", sysfs))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        let trim_supported = discard_max > 0;
+
+        // Check if any mount uses discard option
+        let dev_path = format!("/dev/{}", dev);
+        let discard_mount = mounts_text.lines().any(|l| {
+            let mut p = l.split_whitespace();
+            let d = p.next().unwrap_or("");
+            let _mp = p.next();
+            let _fs = p.next();
+            let opts = p.next().unwrap_or("");
+            (d == dev_path || d.starts_with(&format!("{}/", dev_path)) || d.starts_with(&format!("{}p", dev_path)))
+                && opts.split(',').any(|o| o == "discard")
+        });
+
+        // fstrim last run — check systemd journal for fstrim entries (best effort)
+        let fstrim_last = {
+            let out = std::process::Command::new("journalctl")
+                .args(["-u", "fstrim.service", "--no-pager", "-n", "1", "--output=short"])
+                .output();
+            match out {
+                Ok(o) if !o.stdout.is_empty() => {
+                    let text = String::from_utf8_lossy(&o.stdout);
+                    text.lines()
+                        .last()
+                        .map(|l| {
+                            l.split_whitespace()
+                                .take(3)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_else(|| "see journal".to_string())
+                }
+                _ => "unknown".to_string(),
+            }
+        };
+
+        let trim_str    = if trim_supported { "yes" } else { "no" };
+        let discard_str = if discard_mount  { "mount opt" } else { "—" };
+        let rot_str     = "SSD/NVMe";
+        let note        = if !trim_supported { "no TRIM support" }
+                          else if discard_mount { "continuous discard" }
+                          else { "run fstrim periodically" };
+
+        println!("{:<10}  {:<8}  {:<10}  {:<10}  {:<10}  {}",
+                 dev, rot_str, trim_str, discard_str,
+                 if fstrim_last.len() > 10 { &fstrim_last[..10] } else { &fstrim_last },
+                 note);
+    }
+    Ok(())
+}
+
+fn run_io_pressure() -> Result<()> {
+    // ── System PSI ───────────────────────────────────────────────────
+    println!("System I/O Pressure (PSI)\n");
+
+    let psi_text = std::fs::read_to_string("/proc/pressure/io")
+        .unwrap_or_else(|_| "(PSI not available on this kernel — requires Linux 4.20+)".to_string());
+
+    for line in psi_text.lines() {
+        // Format: "some avg10=0.00 avg60=0.00 avg300=0.00 total=0"
+        let kind = if line.starts_with("some") { "Some (any task stalled)" }
+                   else if line.starts_with("full") { "Full (all tasks stalled)" }
+                   else { line };
+        let stats: Vec<(&str, &str)> = line.split_whitespace()
+            .skip(1)
+            .filter_map(|kv| kv.split_once('='))
+            .collect();
+        if stats.is_empty() {
+            println!("  {}", line);
+            continue;
+        }
+        println!("  {}:", kind);
+        for (k, v) in &stats {
+            println!("    {:12} {}", k, v);
+        }
+        println!();
+    }
+
+    // ── Per-device I/O wait from diskstats ───────────────────────────
+    println!("Per-Device I/O Wait (from /proc/diskstats)\n");
+    println!("{:<12}  {:>12}  {:>12}  {:>14}  {:>14}",
+             "Device", "Read ops", "Write ops", "Read ms", "Write ms");
+    println!("{}", "─".repeat(70));
+
+    let diskstats = std::fs::read_to_string("/proc/diskstats").unwrap_or_default();
+    let mut rows: Vec<(String, u64, u64, u64, u64)> = Vec::new();
+
+    for line in diskstats.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 14 { continue; }
+        let name = f[2];
+        // Skip partitions (end in digit after letters)
+        if name.chars().last().map_or(false, |c| c.is_ascii_digit()) { continue; }
+        if name.starts_with("loop") || name.starts_with("ram") { continue; }
+
+        let read_ops:  u64 = f[3].parse().unwrap_or(0);
+        let read_ms:   u64 = f[6].parse().unwrap_or(0);
+        let write_ops: u64 = f[7].parse().unwrap_or(0);
+        let write_ms:  u64 = f[10].parse().unwrap_or(0);
+
+        if read_ops == 0 && write_ops == 0 { continue; }
+        rows.push((name.to_string(), read_ops, write_ops, read_ms, write_ms));
+    }
+
+    // Sort by total I/O time descending
+    rows.sort_by(|a, b| (b.3 + b.4).cmp(&(a.3 + a.4)));
+
+    for (name, rops, wops, rms, wms) in &rows {
+        println!("{:<12}  {:>12}  {:>12}  {:>12}ms  {:>12}ms",
+                 name, rops, wops, rms, wms);
     }
     Ok(())
 }

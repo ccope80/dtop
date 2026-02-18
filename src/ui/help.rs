@@ -128,6 +128,8 @@ pub fn render(f: &mut Frame, theme: &Theme, scroll: usize) {
         key_line(theme, "  --growfs DEV",       "Grow FS to fill partition/LV"),
         key_line(theme, "  --scrub [DEV]",     "Start/check BTRFS/ZFS/MD scrub"),
         key_line(theme, "  --redundancy",      "RAID/ZFS redundancy status table"),
+        key_line(theme, "  --trim-report",   "TRIM support + discard status per SSD"),
+        key_line(theme, "  --io-pressure",   "PSI I/O pressure + per-device wait"),
         key_line(theme, "  --print-service",     "Print systemd unit for daemon"),
         key_line(theme, "  --test-webhook",      "Send test webhook notification"),
         key_line(theme, "  --edit-config",       "Open config in $EDITOR"),

@@ -99,6 +99,18 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if ok_n > 0   { fleet_spans.push(Span::styled(format!("{}●", ok_n),   theme.ok));  fleet_spans.push(Span::styled(" ", theme.text_dim)); }
     if warn_n > 0 { fleet_spans.push(Span::styled(format!("{}●", warn_n), theme.warn)); fleet_spans.push(Span::styled(" ", theme.text_dim)); }
     if crit_n > 0 { fleet_spans.push(Span::styled(format!("{}●", crit_n), theme.crit)); fleet_spans.push(Span::styled(" ", theme.text_dim)); }
+    // Fleet health bar: 10 chars, proportional fill of ok(green)/warn(yellow)/crit(red)
+    if n > 0 {
+        let bar_w = 10usize;
+        let ok_fill   = ((ok_n   as f64 / n as f64) * bar_w as f64).round() as usize;
+        let warn_fill = ((warn_n as f64 / n as f64) * bar_w as f64).round() as usize;
+        let crit_fill = bar_w.saturating_sub(ok_fill + warn_fill);
+        fleet_spans.push(Span::styled(" [".to_string(), theme.text_dim));
+        if ok_fill   > 0 { fleet_spans.push(Span::styled("█".repeat(ok_fill),   theme.ok)); }
+        if warn_fill > 0 { fleet_spans.push(Span::styled("█".repeat(warn_fill), theme.warn)); }
+        if crit_fill > 0 { fleet_spans.push(Span::styled("█".repeat(crit_fill), theme.crit)); }
+        fleet_spans.push(Span::styled("] ".to_string(), theme.text_dim));
+    }
     fleet_spans.push(Span::styled(avg_suffix, avg_style));
 
     // PSI I/O pressure (appended if available)

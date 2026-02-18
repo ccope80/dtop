@@ -8,7 +8,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
 use std::collections::HashMap;
@@ -84,6 +84,30 @@ pub fn render_device_list(
         .highlight_symbol("▶ ");
 
     f.render_stateful_widget(list, area, state);
+
+    // Draw scrollbar on right edge if list overflows
+    let total = devices.len();
+    let visible = area.height.saturating_sub(2) as usize; // subtract borders
+    if total > visible && visible > 0 {
+        let selected = state.selected().unwrap_or(0);
+        let thumb_h  = ((visible as f64 / total as f64) * visible as f64).round().max(1.0) as usize;
+        let thumb_y  = ((selected as f64 / total.saturating_sub(1) as f64)
+                        * (visible - thumb_h) as f64).round() as usize;
+
+        let scroll_x = area.x + area.width.saturating_sub(1);
+        let content_y = area.y + 1; // skip top border
+
+        for row in 0..visible {
+            let ch = if row >= thumb_y && row < thumb_y + thumb_h { '█' } else { '░' };
+            let cell_area = Rect::new(scroll_x, content_y + row as u16, 1, 1);
+            f.render_widget(
+                Paragraph::new(
+                    Span::styled(ch.to_string(), theme.text_dim)
+                ),
+                cell_area,
+            );
+        }
+    }
 }
 
 const SPARKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];

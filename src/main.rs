@@ -317,6 +317,14 @@ struct Cli {
     /// ATA Secure Erase or NVMe format-nvm on DEVICE (DESTRUCTIVE — requires --yes)
     #[arg(long, value_name = "DEVICE")]
     secure_erase: Option<String>,
+
+    /// List all devices sorted by health score, worst first
+    #[arg(long)]
+    top_health: bool,
+
+    /// Show multi-day health score trend chart for all devices (or one DEVICE)
+    #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
+    health_trend: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -489,6 +497,13 @@ fn main() -> Result<()> {
     }
     if let Some(dev) = &cli.secure_erase {
         return run_secure_erase(dev, cli.yes);
+    }
+    if cli.top_health {
+        return run_top_health();
+    }
+    if let Some(dev_or_all) = &cli.health_trend {
+        let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
+        return run_health_trend(dev);
     }
     if cli.config {
         return run_print_config();
@@ -4392,6 +4407,152 @@ fn run_hotplug() -> Result<()> {
 
         known = current;
     }
+}
+
+fn run_top_health() -> Result<()> {
+    use collectors::{lsblk, smart_cache};
+    use models::device::BlockDevice;
+    use util::health_score::health_score;
+
+    let lsblk_devs = lsblk::run_lsblk().unwrap_or_default();
+    let cache = smart_cache::load();
+
+    let mut devices: Vec<BlockDevice> = lsblk_devs.iter().map(|lb| {
+        let mut dev = BlockDevice::new(lb.name.clone());
+        dev.model          = lb.model.clone();
+        dev.serial         = lb.serial.clone();
+        dev.capacity_bytes = lb.size;
+        dev.rotational     = lb.rotational;
+        dev.transport      = lb.transport.clone();
+        dev.partitions     = lb.partitions.clone();
+        dev.infer_type();
+        if let Some(smart) = cache.get(&lb.name) {
+            dev.smart = Some(smart.clone());
+        }
+        dev
+    }).collect();
+
+    devices.sort_by_key(|d| health_score(d));
+
+    println!("{:<10}  {:>6}  {:>5}  {:>7}  {:>8}  Reason",
+             "Device", "Health", "Temp", "SMART", "Type");
+    println!("{}", "─".repeat(72));
+
+    for dev in &devices {
+        let score  = health_score(dev);
+        let temp   = dev.temperature().map_or("  N/A".to_string(), |t| format!("{:>3}°C", t));
+        let smart  = dev.smart_status();
+        let reason = build_health_reason(dev);
+        println!("{:<10}  {:>5}%  {}  {:>7}  {:>8}  {}",
+                 dev.name, score, temp,
+                 format!("{:?}", smart),
+                 dev.dev_type.label(),
+                 reason);
+    }
+    Ok(())
+}
+
+fn build_health_reason(dev: &models::device::BlockDevice) -> String {
+    let mut reasons: Vec<String> = Vec::new();
+    if let Some(smart) = &dev.smart {
+        for attr in &smart.attributes {
+            if attr.is_at_risk() {
+                reasons.push(format!("attr {} near threshold", attr.id));
+            }
+            if attr.id == 197 && attr.raw_value > 0 {
+                reasons.push(format!("{} pending sectors", attr.raw_value));
+            }
+            if attr.id == 5 && attr.raw_value > 0 {
+                reasons.push(format!("{} reallocated", attr.raw_value));
+            }
+        }
+        if let Some(nvme) = &smart.nvme {
+            if nvme.media_errors > 0 {
+                reasons.push(format!("{} media errors", nvme.media_errors));
+            }
+            if nvme.percentage_used >= 90 {
+                reasons.push(format!("{}% used endurance", nvme.percentage_used));
+            }
+        }
+    }
+    if let Some(t) = dev.temperature() {
+        if t >= 70 { reasons.push(format!("temp {}°C", t)); }
+    }
+    if reasons.is_empty() { "ok".to_string() } else { reasons.join(", ") }
+}
+
+fn run_health_trend(device: Option<&str>) -> Result<()> {
+    use util::health_history;
+
+    let history = health_history::load();
+    if history.is_empty() {
+        println!("No health history yet — run dtop TUI for a while to accumulate data.");
+        return Ok(());
+    }
+
+    let mut names: Vec<&String> = history.keys().collect();
+    names.sort();
+    if let Some(d) = device {
+        let d = d.trim_start_matches("/dev/");
+        names.retain(|n| n.as_str() == d);
+        if names.is_empty() {
+            anyhow::bail!("No health history found for device '{}'.", d);
+        }
+    }
+
+    const CHART_W: usize = 60;
+    const CHART_H: usize = 10;
+    let bars = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+    for name in &names {
+        let scores = history.get(*name).unwrap();
+        if scores.is_empty() { continue; }
+
+        // Downsample to CHART_W columns
+        let samples: Vec<u8> = if scores.len() <= CHART_W {
+            scores.clone()
+        } else {
+            let step = scores.len() as f64 / CHART_W as f64;
+            (0..CHART_W).map(|i| {
+                let idx = (i as f64 * step) as usize;
+                scores[idx.min(scores.len() - 1)]
+            }).collect()
+        };
+
+        let min_s = *samples.iter().min().unwrap_or(&0);
+        let max_s = *samples.iter().max().unwrap_or(&100);
+        let latest = *samples.last().unwrap_or(&0);
+        let avg: u8 = (samples.iter().map(|&s| s as u32).sum::<u32>() / samples.len() as u32) as u8;
+
+        println!("  {}  ({} samples, latest: {}%  avg: {}%  min: {}%  max: {}%)",
+                 name, scores.len(), latest, avg, min_s, max_s);
+        println!("  100% ┤");
+
+        // Render CHART_H rows top-to-bottom (row 0 = top = 100%)
+        for row in 0..CHART_H {
+            // Threshold for this row (top row = 100%, bottom row ≈ lowest)
+            let row_threshold = 100 - (row * 100 / CHART_H);
+            let row_lower     = 100 - ((row + 1) * 100 / CHART_H);
+            let label = if row == 0 { format!("{:>4}%", row_threshold) }
+                        else if row == CHART_H - 1 { format!("{:>4}%", row_lower) }
+                        else { "     ".to_string() };
+            let line: String = samples.iter().map(|&s| {
+                let s = s as usize;
+                if s >= row_threshold {
+                    '█'
+                } else if s > row_lower {
+                    let frac = (s - row_lower) * 8 / (row_threshold - row_lower).max(1);
+                    bars[frac.min(8)]
+                } else {
+                    ' '
+                }
+            }).collect();
+            println!("  {} │{}", label, line);
+        }
+        println!("       └{}┘", "─".repeat(samples.len()));
+        println!("         {} samples (oldest → newest)\n", scores.len());
+    }
+    Ok(())
 }
 
 fn run_secure_erase(device: &str, confirmed: bool) -> Result<()> {

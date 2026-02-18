@@ -225,6 +225,18 @@ struct Cli {
     /// Show cumulative I/O totals since boot (bytes, ops, avg latency) per device
     #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
     cumulative_io: Option<String>,
+
+    /// Show processes with open files on DEVICE or MOUNTPOINT (wraps lsof)
+    #[arg(long, value_name = "DEVICE|MOUNT")]
+    lsof: Option<String>,
+
+    /// Print block device UUIDs, labels, and filesystem types (wraps blkid)
+    #[arg(long)]
+    blkid: bool,
+
+    /// Print active mount table with key options (rw/ro, discard, errors, etc.)
+    #[arg(long)]
+    mount: bool,
 }
 
 fn main() -> Result<()> {
@@ -325,6 +337,15 @@ fn main() -> Result<()> {
     if let Some(dev_or_all) = &cli.cumulative_io {
         let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
         return run_cumulative_io(dev);
+    }
+    if let Some(target) = &cli.lsof {
+        return run_lsof(target);
+    }
+    if cli.blkid {
+        return run_blkid();
+    }
+    if cli.mount {
+        return run_mount();
     }
     if cli.config {
         return run_print_config();
@@ -2729,6 +2750,204 @@ fn run_cumulative_io(device: Option<&str>) -> Result<()> {
             avg_r_ms,
             avg_w_ms,
         );
+    }
+    Ok(())
+}
+
+// ── --lsof ────────────────────────────────────────────────────────────────────
+
+fn run_lsof(target: &str) -> Result<()> {
+    // Determine whether target is a device node or a directory/mount
+    let (flag, display) = if target.starts_with("/dev/") {
+        // lsof <device>  — list processes with the device open
+        (target.to_string(), format!("device {}", target))
+    } else {
+        // lsof +D <mountpoint>  — recursively find open files under path
+        (target.to_string(), format!("mount {}", target))
+    };
+
+    let mut cmd = std::process::Command::new("lsof");
+    if target.starts_with("/dev/") {
+        cmd.arg(&flag);
+    } else {
+        cmd.args(["+D", &flag]);
+    }
+
+    let out = cmd.output()
+        .map_err(|e| anyhow::anyhow!("lsof failed: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+
+    if lines.is_empty() || (lines.len() == 1 && lines[0].starts_with("COMMAND")) {
+        println!("No processes with open files on {}.", display);
+        return Ok(());
+    }
+
+    // Print header then deduplicated rows (lsof can repeat entries for mmap regions etc.)
+    println!("Open files on {} ({} entries):", display, lines.len().saturating_sub(1));
+    println!("{}", "─".repeat(90));
+
+    // Track (pid, command, fd, name) to deduplicate mem-mapped duplicates
+    let mut seen = std::collections::HashSet::new();
+
+    for (i, line) in lines.iter().enumerate() {
+        if i == 0 {
+            // Reformatted header
+            println!("{:<16}  {:>7}  {:<10}  {:<6}  {:<8}  {}",
+                "Command", "PID", "User", "FD", "Type", "Name");
+            println!("{}", "─".repeat(90));
+            continue;
+        }
+        // split_whitespace gives clean tokens; NAME is everything from index 8 onward
+        let t: Vec<&str> = line.split_whitespace().collect();
+        if t.len() < 9 { continue; }
+        let (cmd, pid, user, fd, ftype) = (t[0], t[1], t[2], t[3], t[4]);
+        // t[5]=DEVICE, t[6]=SIZE/OFF, t[7]=NODE, t[8..]=NAME (may contain spaces)
+        let name = t[8..].join(" ");
+
+        // Skip memory-mapped/deleted duplicates
+        if ftype == "MEM" || ftype == "DEL" { continue; }
+
+        let key = format!("{}-{}-{}-{}", pid, cmd, fd, name);
+        if !seen.insert(key) { continue; }
+
+        let cmd_short = if cmd.len() > 15 { &cmd[..15] } else { cmd };
+        println!("{:<16}  {:>7}  {:<10}  {:<6}  {:<8}  {}",
+            cmd_short, pid, user, fd, ftype, name);
+    }
+    Ok(())
+}
+
+// ── --blkid ───────────────────────────────────────────────────────────────────
+
+fn run_blkid() -> Result<()> {
+    let out = std::process::Command::new("blkid")
+        .output()
+        .map_err(|e| anyhow::anyhow!("blkid failed: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Parse "key=value" pairs; skip loop devices
+    struct BlkEntry {
+        device: String,
+        label:  String,
+        uuid:   String,
+        fs_type: String,
+        partuuid: String,
+    }
+
+    let mut entries: Vec<BlkEntry> = Vec::new();
+
+    for line in stdout.lines() {
+        let (dev, rest) = match line.split_once(':') {
+            Some(p) => p,
+            None => continue,
+        };
+        let dev = dev.trim();
+        if dev.starts_with("/dev/loop") { continue; }
+
+        let get = |key: &str| -> String {
+            // Find KEY="value" in rest
+            let needle = format!("{}=\"", key);
+            rest.find(&needle)
+                .and_then(|i| {
+                    let after = &rest[i + needle.len()..];
+                    after.find('"').map(|j| after[..j].to_string())
+                })
+                .unwrap_or_default()
+        };
+
+        entries.push(BlkEntry {
+            device:   dev.to_string(),
+            label:    get("LABEL"),
+            uuid:     get("UUID"),
+            fs_type:  get("TYPE"),
+            partuuid: get("PARTUUID"),
+        });
+    }
+
+    if entries.is_empty() {
+        println!("No block devices found (run as root for complete output).");
+        return Ok(());
+    }
+
+    // Sort: whole disks first, then partitions
+    entries.sort_by(|a, b| a.device.cmp(&b.device));
+
+    println!("{:<16}  {:<14}  {:<38}  {:<10}  {}",
+        "Device", "Label", "UUID", "Type", "PARTUUID");
+    println!("{}", "─".repeat(96));
+
+    for e in &entries {
+        let label    = if e.label.is_empty()    { "—".to_string() } else { e.label.clone() };
+        let uuid     = if e.uuid.is_empty()     { "—".to_string() } else { e.uuid.clone() };
+        let fs_type  = if e.fs_type.is_empty()  { "—".to_string() } else { e.fs_type.clone() };
+        let partuuid = if e.partuuid.is_empty() { "—".to_string() } else { e.partuuid.clone() };
+        println!("{:<16}  {:<14}  {:<38}  {:<10}  {}",
+            e.device, label, uuid, fs_type, partuuid);
+    }
+    Ok(())
+}
+
+// ── --mount ───────────────────────────────────────────────────────────────────
+
+fn run_mount() -> Result<()> {
+    const SKIP_FS: &[&str] = &[
+        "proc", "sysfs", "devpts", "tmpfs", "devtmpfs", "cgroup", "cgroup2",
+        "pstore", "efivarfs", "securityfs", "debugfs", "tracefs", "bpf",
+        "hugetlbfs", "mqueue", "fusectl", "configfs", "binfmt_misc",
+        "overlay", "nsfs", "rpc_pipefs", "autofs", "squashfs",
+    ];
+    const SKIP_PREFIX: &[&str] = &[
+        "/proc", "/sys", "/dev/pts", "/run/user", "/snap",
+    ];
+
+    // Important options to surface (in this priority order)
+    let important_opts = |opts: &str| -> String {
+        let mut keep: Vec<&str> = Vec::new();
+        for opt in opts.split(',') {
+            match opt {
+                "rw" | "ro" | "noexec" | "nosuid" | "nodev"
+                | "discard" | "relatime" | "noatime" | "strictatime"
+                | "bind" | "rbind" => keep.push(opt),
+                o if o.starts_with("errors=") => keep.push(o),
+                o if o.starts_with("commit=") => keep.push(o),
+                o if o.starts_with("mode=")   => keep.push(o),
+                _ => {}
+            }
+        }
+        keep.join(",")
+    };
+
+    let content = std::fs::read_to_string("/proc/mounts")?;
+    let mut rows: Vec<(String, String, String, String, bool)> = Vec::new();
+
+    for line in content.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 4 { continue; }
+        let (dev, mount, fstype, opts) = (f[0], f[1], f[2], f[3]);
+
+        if SKIP_FS.contains(&fstype) { continue; }
+        if SKIP_PREFIX.iter().any(|p| mount.starts_with(p)) { continue; }
+        if dev.starts_with("/dev/loop") { continue; }
+
+        let ro = opts.split(',').any(|o| o == "ro");
+        let key_opts = important_opts(opts);
+        rows.push((dev.to_string(), mount.to_string(), fstype.to_string(), key_opts, ro));
+    }
+
+    rows.sort_by(|a, b| a.1.cmp(&b.1));
+
+    println!("{:<22}  {:<24}  {:<8}  {}",
+        "Device", "Mount", "FS", "Options");
+    println!("{}", "─".repeat(80));
+
+    for (dev, mount, fstype, opts, ro) in &rows {
+        let dev_short = dev.trim_start_matches("/dev/");
+        let ro_marker = if *ro { " [RO]" } else { "" };
+        println!("{:<22}  {:<24}  {:<8}  {}{}",
+            dev_short, mount, fstype, opts, ro_marker);
     }
     Ok(())
 }

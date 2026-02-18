@@ -1,4 +1,5 @@
 pub mod alert_log;
+pub mod notify;
 pub mod health_history;
 pub mod health_score;
 pub mod human;

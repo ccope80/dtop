@@ -102,6 +102,10 @@ pub struct AlertThresholds {
     pub latency_warn_ms:      f64,
     /// Average read latency critical threshold (ms). 0 = disabled.
     pub latency_crit_ms:      f64,
+    /// Alert (warning) when a filesystem is projected to fill within this many days. 0 = disabled.
+    pub fill_days_warn:       f64,
+    /// Alert (critical) when a filesystem is projected to fill within this many days. 0 = disabled.
+    pub fill_days_crit:       f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +125,8 @@ pub struct NotificationsConfig {
     pub notify_critical: bool,
     /// Fire webhook for new Warning-severity alerts.
     pub notify_warning: bool,
+    /// Send a desktop notification via notify-send when new alerts fire (TUI mode).
+    pub notify_send: bool,
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────
@@ -166,6 +172,8 @@ impl Default for AlertThresholds {
             io_util_warn_pct:     95.0,
             latency_warn_ms:      50.0,
             latency_crit_ms:      200.0,
+            fill_days_warn:       14.0,
+            fill_days_crit:       3.0,
         }
     }
 }
@@ -176,6 +184,7 @@ impl Default for NotificationsConfig {
             webhook_url:      String::new(),
             notify_critical:  true,
             notify_warning:   false,
+            notify_send:      false,
         }
     }
 }

@@ -239,6 +239,25 @@ pub fn evaluate(devices: &[BlockDevice], filesystems: &[Filesystem], alert_cfg: 
                 message:  format!("Inodes {:.0}% used", ipct),
             });
         }
+
+        // Fill-rate projection
+        if let Some(days) = fs.days_until_full {
+            if thr.fill_days_crit > 0.0 && days <= thr.fill_days_crit {
+                alerts.push(Alert {
+                    severity: Severity::Critical,
+                    device:   None,
+                    mount:    Some(fs.mount.clone()),
+                    message:  format!("Projected full in {:.1} days at current fill rate", days),
+                });
+            } else if thr.fill_days_warn > 0.0 && days <= thr.fill_days_warn {
+                alerts.push(Alert {
+                    severity: Severity::Warning,
+                    device:   None,
+                    mount:    Some(fs.mount.clone()),
+                    message:  format!("Projected full in {:.1} days at current fill rate", days),
+                });
+            }
+        }
     }
 
     // Sort: Critical first, then Warning, then Info

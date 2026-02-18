@@ -44,6 +44,11 @@ pub fn render_config_overlay(f: &mut Frame, config: &Config, theme: &Theme) {
         ("Temp HDD warn/crit",format!("{}°C / {}°C", t.temperature_warn_hdd, t.temperature_crit_hdd), false),
         ("I/O util warn",     format!("{:.0}%", t.io_util_warn_pct), false),
         ("Latency warn/crit", format!("{:.0}ms / {:.0}ms", t.latency_warn_ms, t.latency_crit_ms), false),
+        ("Fill-rate warn/crit", {
+            let w = if t.fill_days_warn > 0.0 { format!("{:.0}d", t.fill_days_warn) } else { "off".into() };
+            let c = if t.fill_days_crit > 0.0 { format!("{:.0}d", t.fill_days_crit) } else { "off".into() };
+            format!("{} / {}", w, c)
+        }, false),
         ("",                  String::new(),       false),
         ("Alert cooldown",    String::new(),       true),
         ("Cooldown",          format!("{} h  (0 = no cooldown)", config.alerts.cooldown_hours), false),
@@ -81,6 +86,7 @@ pub fn render_config_overlay(f: &mut Frame, config: &Config, theme: &Theme) {
         kv("Webhook URL",    &webhook_display, theme),
         kv("Notify on CRIT", if config.notifications.notify_critical { "yes" } else { "no" }, theme),
         kv("Notify on WARN", if config.notifications.notify_warning  { "yes" } else { "no" }, theme),
+        kv("notify-send",    if config.notifications.notify_send     { "enabled" } else { "disabled" }, theme),
         Line::from(""),
         hdr("Device exclusions", theme),
         dim(&exclude_str, theme),

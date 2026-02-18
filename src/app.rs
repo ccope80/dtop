@@ -1,7 +1,7 @@
 use crate::alerts::{self, Alert};
 use crate::collectors::{diskstats, filesystem, lsblk, lvm, mdraid, nfs, pressure, process_io, smart as smart_collector, smart_cache, zfs};
 use crate::collectors::pressure::SystemPressure;
-use crate::util::{alert_log, health_history, smart_anomaly, smart_baseline, user_state, webhook, write_endurance};
+use crate::util::{alert_log, health_history, notify, smart_anomaly, smart_baseline, user_state, webhook, write_endurance};
 use crate::config::Config;
 use crate::ui::benchmark_popup;
 use crate::input::{handle_key, Action};
@@ -471,6 +471,13 @@ impl App {
                 new_alerts.extend(alerts::evaluate_volumes(&self.raid_arrays, &self.zfs_pools));
                 new_alerts.sort_by(|a, b| b.severity.cmp(&a.severity));
                 self.update_alert_history(&prev_alerts, &new_alerts);
+                // Desktop notifications for newly-firing alerts
+                if self.config.notifications.notify_send {
+                    let fresh: Vec<&alerts::Alert> = new_alerts.iter()
+                        .filter(|a| !prev_alerts.iter().any(|p| p.key() == a.key()))
+                        .collect();
+                    notify::notify_send(&fresh);
+                }
                 self.alerts = new_alerts;
             }
 

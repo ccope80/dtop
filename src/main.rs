@@ -77,6 +77,10 @@ struct Cli {
     /// Export current device snapshot as CSV and exit
     #[arg(long)]
     csv: bool,
+
+    /// Print a rolling status snapshot every N seconds (0 = once and exit)
+    #[arg(long, value_name = "SECS")]
+    watch: Option<u64>,
 }
 
 fn main() -> Result<()> {
@@ -108,6 +112,9 @@ fn main() -> Result<()> {
     }
     if cli.csv {
         return run_csv(!cli.no_smart);
+    }
+    if let Some(secs) = cli.watch {
+        return run_watch(secs, !cli.no_smart);
     }
     if cli.daemon {
         return run_daemon(cli.interval, !cli.no_smart);
@@ -451,6 +458,104 @@ fn run_summary(smart_enabled: bool) -> Result<()> {
         std::process::exit(2);
     } else if warn_n > 0 {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn run_watch(interval_secs: u64, smart_enabled: bool) -> Result<()> {
+    use collectors::{filesystem, smart as smart_collector};
+    use models::device::BlockDevice;
+    use util::human::{fmt_bytes, fmt_rate};
+    use util::health_score::health_score;
+
+    let cfg = config::Config::load();
+    let tick = if interval_secs == 0 { None } else { Some(std::time::Duration::from_secs(interval_secs)) };
+
+    loop {
+        let lsblk_devs = collectors::lsblk::run_lsblk().unwrap_or_default();
+        let raw_stats  = collectors::diskstats::read_diskstats().unwrap_or_default();
+        let fs_list    = filesystem::read_filesystems().unwrap_or_default();
+
+        let devices: Vec<BlockDevice> = lsblk_devs.iter()
+            .filter(|lb| !cfg.devices.exclude.iter().any(|pat| {
+                if let Some(p) = pat.strip_suffix('*') { lb.name.starts_with(p) }
+                else { pat == &lb.name }
+            }))
+            .filter(|lb| raw_stats.contains_key(&lb.name))
+            .map(|lb| {
+                let mut dev = BlockDevice::new(lb.name.clone());
+                dev.model = lb.model.clone(); dev.serial = lb.serial.clone();
+                dev.capacity_bytes = lb.size; dev.rotational = lb.rotational;
+                dev.transport = lb.transport.clone(); dev.partitions = lb.partitions.clone();
+                dev.infer_type();
+                if smart_enabled { dev.smart = smart_collector::poll_device(&lb.name); }
+                dev
+            })
+            .collect();
+
+        let raids = collectors::mdraid::read_mdstat();
+        let pools = collectors::zfs::read_zpools();
+        let mut active = alerts::evaluate(&devices, &fs_list, &cfg.alerts);
+        active.extend(alerts::evaluate_volumes(&raids, &pools));
+        active.sort_by(|a, b| b.severity.cmp(&a.severity));
+
+        let now  = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let bar  = "═".repeat(72);
+        let secs_label = if interval_secs == 0 { "once".to_string() } else { format!("{}s", interval_secs) };
+        println!("{}", bar);
+        println!("  DTop  {}  (--watch {})", now, secs_label);
+        println!("{}", bar);
+
+        println!("\nDEVICES  ({} total)", devices.len());
+        for dev in &devices {
+            let temp    = dev.temperature().map(|t| format!("{}°C", t)).unwrap_or_else(|| "  —  ".to_string());
+            let smart_s = dev.smart.as_ref()
+                .map(|s| s.status.label().trim().to_string())
+                .unwrap_or_else(|| "?".to_string());
+            println!(
+                "  {:<8}  {:<4}  R:{:>9}  W:{:>9}  util:{:>4.0}%  {:>5}  SMART:{:<5}  health:{}",
+                dev.name, dev.dev_type.label().trim(),
+                fmt_rate(dev.read_bytes_per_sec), fmt_rate(dev.write_bytes_per_sec),
+                dev.io_util_pct, temp, smart_s, health_score(dev),
+            );
+        }
+
+        println!("\nFILESYSTEMS  ({} total)", fs_list.len());
+        for fs in &fs_list {
+            let pct   = fs.use_pct();
+            let alert = if pct >= 95.0 { " !!" } else if pct >= 85.0 { " !" } else { "" };
+            let eta   = fs.days_until_full
+                .map(|d| format!("  → full ~{:.0}d", d))
+                .unwrap_or_default();
+            println!(
+                "  {:<20}  {:<6}  {:>8} / {:>8}  ({:>4.1}%){}{}",
+                fs.mount, fs.fs_type,
+                fmt_bytes(fs.used_bytes), fmt_bytes(fs.total_bytes),
+                pct, alert, eta,
+            );
+        }
+
+        if active.is_empty() {
+            println!("\nALERTS  — none");
+        } else {
+            println!("\nALERTS  ({} active)", active.len());
+            for a in &active {
+                println!("  [{}] {}{}", a.severity.label(), a.prefix(), a.message);
+            }
+        }
+
+        if let Some(psi) = collectors::pressure::read_pressure() {
+            println!(
+                "\nIO PRESSURE  some:{:.1}%  full:{:.1}%  (10s avg)",
+                psi.io.some.avg10, psi.io.full.avg10
+            );
+        }
+
+        println!();
+        match tick {
+            None    => break,
+            Some(d) => std::thread::sleep(d),
+        }
     }
     Ok(())
 }

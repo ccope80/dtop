@@ -4929,7 +4929,7 @@ Nagios health check:
 .B dtop \-\-check
 .TP
 Full HTML report:
-.B dtop \-\-report\-html /tmp/disk-report.html
+.B dtop \-\-report\-html \-\-output /tmp/disk-report.html
 .TP
 Watch a device's SMART errors:
 .B dtop \-\-smart\-errors sda

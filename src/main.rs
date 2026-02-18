@@ -121,6 +121,30 @@ struct Cli {
     /// List all saved SMART baselines and exit
     #[arg(long)]
     baselines: bool,
+
+    /// Schedule a SMART self-test for DEVICE and exit (short by default)
+    #[arg(long, value_name = "DEVICE")]
+    schedule_test: Option<String>,
+
+    /// Use a long/extended self-test instead of short (used with --schedule-test)
+    #[arg(long)]
+    long: bool,
+
+    /// Poll until the self-test completes (used with --schedule-test; Ctrl-C safe)
+    #[arg(long)]
+    wait: bool,
+
+    /// Poll SMART and save a baseline snapshot for DEVICE, then exit
+    #[arg(long, value_name = "DEVICE")]
+    save_baseline: Option<String>,
+
+    /// Clear SMART anomaly records and exit; omit DEVICE to clear all
+    #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
+    clear_anomalies: Option<String>,
+
+    /// Skip confirmation prompts (used with --clear-anomalies)
+    #[arg(long)]
+    yes: bool,
 }
 
 fn main() -> Result<()> {
@@ -155,6 +179,16 @@ fn main() -> Result<()> {
     }
     if cli.baselines {
         return run_baselines();
+    }
+    if let Some(dev) = &cli.schedule_test {
+        return run_schedule_test(dev, cli.long, cli.wait);
+    }
+    if let Some(dev) = &cli.save_baseline {
+        return run_save_baseline(dev);
+    }
+    if let Some(dev_or_all) = &cli.clear_anomalies {
+        let device = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
+        return run_clear_anomalies(device, cli.yes);
     }
     if cli.config {
         return run_print_config();
@@ -555,6 +589,166 @@ fn parse_since(s: &str) -> Option<chrono::Duration> {
         return Some(chrono::Duration::minutes(n.trim().parse::<i64>().ok()?));
     }
     None
+}
+
+fn run_schedule_test(device: &str, long_test: bool, wait: bool) -> Result<()> {
+    let name      = device.trim_start_matches("/dev/");
+    let dev_path  = format!("/dev/{}", name);
+    let test_type = if long_test { "long" } else { "short" };
+    let eta       = if long_test { "(may take hours on large HDDs)" } else { "(~2 minutes)" };
+
+    println!("Scheduling {} SMART self-test on {} {}…", test_type, dev_path, eta);
+
+    let out = std::process::Command::new("smartctl")
+        .args(["-t", test_type, &dev_path])
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to run smartctl: {}\nIs smartctl installed?", e))?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.contains("previous self-test") || stdout.contains("test already in progress") {
+        println!("A self-test is already running on {} — try again after it completes.", dev_path);
+    } else if stdout.contains("Test has begun") || stdout.contains("SMART offline immediate test") {
+        println!("Test scheduled successfully.");
+    } else if !out.status.success() {
+        eprintln!("smartctl exited {}: {}", out.status, stdout.trim());
+        std::process::exit(1);
+    } else {
+        // Unknown but non-error output — print it and continue
+        println!("{}", stdout.trim());
+    }
+
+    if !wait {
+        println!("Tip: re-run with --wait to block until completion, or use --device-report {} to check later.", name);
+        return Ok(());
+    }
+
+    let poll_secs = if long_test { 120u64 } else { 30u64 };
+    println!("Polling every {}s (Ctrl-C is safe — the test continues on-device)…", poll_secs);
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(poll_secs));
+
+        let poll = match std::process::Command::new("smartctl")
+            .args(["-a", &dev_path])
+            .output()
+        {
+            Ok(o)  => o,
+            Err(e) => { eprintln!("Poll error: {}", e); continue; }
+        };
+
+        let text = String::from_utf8_lossy(&poll.stdout);
+
+        if let Some(remaining) = cli_parse_smart_test_remaining(&text) {
+            let done = 100u8.saturating_sub(remaining);
+            let now  = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{}]  {}% complete  ({}% remaining)", now, done, remaining);
+        } else if text.contains("without error") {
+            println!("✓  Self-test completed successfully.");
+            break;
+        } else if text.contains("FAILED!") || (text.contains("# 1") && text.contains("Failed")) {
+            eprintln!("✗  Self-test FAILED — run 'dtop --device-report {}' for details.", name);
+            std::process::exit(2);
+        } else if text.contains("borted") {
+            println!("⚠  Self-test was aborted.");
+            break;
+        }
+        // else: result is ambiguous (test may not have started yet) — keep polling
+    }
+    Ok(())
+}
+
+/// Extract the "X% of test remaining" value from smartctl -a output.
+fn cli_parse_smart_test_remaining(text: &str) -> Option<u8> {
+    for line in text.lines() {
+        if line.contains("% of test remaining") {
+            for word in line.split_whitespace() {
+                if word.ends_with('%') {
+                    return word.trim_end_matches('%').parse::<u8>().ok();
+                }
+            }
+        }
+    }
+    None
+}
+
+fn run_save_baseline(device: &str) -> Result<()> {
+    use collectors::smart as smart_collector;
+    use util::smart_baseline;
+
+    let name = device.trim_start_matches("/dev/");
+    println!("Polling SMART data for /dev/{}…", name);
+
+    let smart = match smart_collector::poll_device(name) {
+        Some(s) => s,
+        None => {
+            eprintln!(
+                "SMART data unavailable for /dev/{}.\n\
+                 Is smartctl installed and does the device support SMART?",
+                name
+            );
+            std::process::exit(1);
+        }
+    };
+
+    smart_baseline::save(name, &smart);
+
+    println!("Baseline saved for /dev/{}", name);
+    if let Some(h) = smart.power_on_hours {
+        println!("  Power-On Hours : {} h  ({:.1} yr)", h, h as f64 / 8760.0);
+    }
+    println!("  SMART Status   : {}", smart.status.label().trim());
+    println!("  Attributes     : {}", smart.attributes.len());
+    println!("  Date           : {}", chrono::Local::now().format("%Y-%m-%d"));
+    println!("\nUse 'dtop --device-report {}' to compare current SMART against this baseline.", name);
+    Ok(())
+}
+
+fn run_clear_anomalies(device: Option<&str>, yes: bool) -> Result<()> {
+    use util::smart_anomaly;
+    use std::io::Write;
+
+    let mut log = smart_anomaly::load();
+    if log.is_empty() {
+        println!("No anomalies tracked — nothing to clear.");
+        return Ok(());
+    }
+
+    let (desc, count) = match device {
+        None => {
+            let n: usize = log.values().map(|d| d.len()).sum();
+            (format!("all {} device(s)", log.len()), n)
+        }
+        Some(dev) => {
+            let n = log.get(dev).map(|d| d.len()).unwrap_or(0);
+            if n == 0 {
+                println!("No anomalies tracked for '{}'.", dev);
+                return Ok(());
+            }
+            (format!("device '{}'", dev), n)
+        }
+    };
+
+    if !yes {
+        print!("Clear {} anomal{} from {}? [y/N] ",
+            count, if count == 1 { "y" } else { "ies" }, desc);
+        let _ = std::io::stdout().flush();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    match device {
+        None      => log.clear(),
+        Some(dev) => { log.remove(dev); }
+    }
+
+    smart_anomaly::save(&log);
+    println!("Cleared {} anomal{} from {}.",
+        count, if count == 1 { "y" } else { "ies" }, desc);
+    Ok(())
 }
 
 fn run_anomalies() -> Result<()> {

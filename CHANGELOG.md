@@ -4,6 +4,11 @@ All notable changes to dtop are documented here.
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-02-18
+
+### Fixed
+- Help overlay and man page now show correct syntax for `--report-html` and `--report-md`: use `--output FILE` rather than a positional argument
+
 ## [0.1.1] — 2026-02-18
 
 ### Fixed

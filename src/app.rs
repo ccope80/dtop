@@ -265,6 +265,9 @@ pub struct App {
     // NFS RTT history: mount → (read_rtt × 10 as u64, write_rtt × 10 as u64)
     pub nfs_rtt_history: HashMap<String, (RingBuffer, RingBuffer)>,
 
+    // Per-device I/O rate history: device → (read KB/s, write KB/s)
+    pub device_io_history: HashMap<String, (RingBuffer, RingBuffer)>,
+
     // Filesystem usage history for fill-rate computation: mount → [(Instant, used_bytes)]
     fs_usage_history: HashMap<String, VecDeque<(Instant, u64)>>,
 
@@ -346,6 +349,7 @@ impl App {
             detail_show_desc:    false,
             fs_usage_history:    HashMap::new(),
             nfs_rtt_history:     HashMap::new(),
+            device_io_history:   HashMap::new(),
             should_quit:   false,
         };
 
@@ -455,10 +459,12 @@ impl App {
                 let prev_alerts = self.alerts.clone();
                 self.collect_fast()?;
                 self.last_fast_tick = Instant::now();
-                let new_alerts = alerts::evaluate(
+                let mut new_alerts = alerts::evaluate(
                     &self.devices, &self.filesystems,
                     &self.config.alerts,
                 );
+                new_alerts.extend(alerts::evaluate_volumes(&self.raid_arrays, &self.zfs_pools));
+                new_alerts.sort_by(|a, b| b.severity.cmp(&a.severity));
                 self.update_alert_history(&prev_alerts, &new_alerts);
                 self.alerts = new_alerts;
             }
@@ -1042,6 +1048,22 @@ impl App {
                 .or_insert_with(|| (RingBuffer::new(60), RingBuffer::new(60)));
             entry.0.push(rrtt);
             entry.1.push(wrtt);
+        }
+
+        // Record per-device I/O rate history (KB/s)
+        let io_updates: Vec<(String, u64, u64)> = self.devices.iter()
+            .map(|d| (
+                d.name.clone(),
+                (d.read_bytes_per_sec  / 1024.0) as u64,
+                (d.write_bytes_per_sec / 1024.0) as u64,
+            ))
+            .collect();
+        for (name, rkb, wkb) in io_updates {
+            let entry = self.device_io_history
+                .entry(name)
+                .or_insert_with(|| (RingBuffer::new(60), RingBuffer::new(60)));
+            entry.0.push(rkb);
+            entry.1.push(wkb);
         }
 
         // Accumulate write endurance per device

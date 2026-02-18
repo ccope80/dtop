@@ -69,6 +69,10 @@ struct Cli {
     /// Print shell completion script and exit (bash, zsh, fish, elvish, powershell)
     #[arg(long, value_name = "SHELL")]
     completions: Option<String>,
+
+    /// Print a one-line health summary and exit (exit 0=OK, 1=WARN, 2=CRIT)
+    #[arg(long)]
+    summary: bool,
 }
 
 fn main() -> Result<()> {
@@ -94,6 +98,9 @@ fn main() -> Result<()> {
     }
     if let Some(shell) = &cli.completions {
         return run_completions(shell);
+    }
+    if cli.summary {
+        return run_summary(!cli.no_smart);
     }
     if cli.daemon {
         return run_daemon(cli.interval, !cli.no_smart);
@@ -201,8 +208,12 @@ fn run_report() -> Result<()> {
     use util::report;
     let cfg = config::Config::load();
     let (devices, filesystems) = report::collect_snapshot();
-    let alerts = alerts::evaluate(&devices, &filesystems, &cfg.alerts);
-    print!("{}", report::generate(&devices, &filesystems, &alerts));
+    let raids = collectors::mdraid::read_mdstat();
+    let pools = collectors::zfs::read_zpools();
+    let mut all_alerts = alerts::evaluate(&devices, &filesystems, &cfg.alerts);
+    all_alerts.extend(alerts::evaluate_volumes(&raids, &pools));
+    all_alerts.sort_by(|a, b| b.severity.cmp(&a.severity));
+    print!("{}", report::generate(&devices, &filesystems, &all_alerts));
     Ok(())
 }
 
@@ -297,16 +308,21 @@ fn run_check(smart_enabled: bool) -> Result<()> {
         })
         .collect();
 
-    let active_alerts = alerts::evaluate(&devices, &fs_list, &cfg.alerts);
+    let raids = collectors::mdraid::read_mdstat();
+    let pools = collectors::zfs::read_zpools();
+    let mut active_alerts = alerts::evaluate(&devices, &fs_list, &cfg.alerts);
+    active_alerts.extend(alerts::evaluate_volumes(&raids, &pools));
+    active_alerts.sort_by(|a, b| b.severity.cmp(&a.severity));
+
     let has_crit = active_alerts.iter().any(|a| a.severity == Severity::Critical);
     let has_warn = active_alerts.iter().any(|a| a.severity == Severity::Warning);
 
     if active_alerts.is_empty() {
-        println!("OK — {} device(s), {} filesystem(s), no alerts", devices.len(), fs_list.len());
+        println!("OK — {} device(s), {} filesystem(s), {} array(s), no alerts",
+            devices.len(), fs_list.len(), raids.len() + pools.len());
         std::process::exit(0);
     }
 
-    // Print all active alerts to stdout
     for a in &active_alerts {
         println!("[{}] {}{}", a.severity.label(), a.prefix(), a.message);
     }
@@ -353,7 +369,11 @@ fn run_daemon(interval_ms: u64, smart_enabled: bool) -> Result<()> {
             })
             .collect();
 
-        let new_alerts = alerts::evaluate(&devices, &fs_list, &cfg.alerts);
+        let raids = collectors::mdraid::read_mdstat();
+        let pools = collectors::zfs::read_zpools();
+        let mut new_alerts = alerts::evaluate(&devices, &fs_list, &cfg.alerts);
+        new_alerts.extend(alerts::evaluate_volumes(&raids, &pools));
+        new_alerts.sort_by(|a, b| b.severity.cmp(&a.severity));
         let now = chrono::Local::now().format("%H:%M:%S").to_string();
         let mut fresh: Vec<alerts::Alert> = Vec::new();
         for alert in &new_alerts {
@@ -376,6 +396,56 @@ fn run_daemon(interval_ms: u64, smart_enabled: bool) -> Result<()> {
         prev_alerts = new_alerts;
         std::thread::sleep(tick);
     }
+}
+
+fn run_summary(smart_enabled: bool) -> Result<()> {
+    use collectors::{filesystem, smart as smart_collector};
+    use models::device::BlockDevice;
+    use alerts::Severity;
+
+    let cfg = config::Config::load();
+    let lsblk_devs = collectors::lsblk::run_lsblk().unwrap_or_default();
+    let raw_stats  = collectors::diskstats::read_diskstats().unwrap_or_default();
+    let fs_list    = filesystem::read_filesystems().unwrap_or_default();
+
+    let devices: Vec<BlockDevice> = lsblk_devs.iter()
+        .filter(|lb| !cfg.devices.exclude.iter().any(|pat| {
+            if let Some(p) = pat.strip_suffix('*') { lb.name.starts_with(p) }
+            else { pat == &lb.name }
+        }))
+        .filter(|lb| raw_stats.contains_key(&lb.name))
+        .map(|lb| {
+            let mut dev = BlockDevice::new(lb.name.clone());
+            dev.model = lb.model.clone(); dev.serial = lb.serial.clone();
+            dev.capacity_bytes = lb.size; dev.rotational = lb.rotational;
+            dev.transport = lb.transport.clone(); dev.partitions = lb.partitions.clone();
+            dev.infer_type();
+            if smart_enabled { dev.smart = smart_collector::poll_device(&lb.name); }
+            dev
+        })
+        .collect();
+
+    let raids = collectors::mdraid::read_mdstat();
+    let pools = collectors::zfs::read_zpools();
+    let mut active = alerts::evaluate(&devices, &fs_list, &cfg.alerts);
+    active.extend(alerts::evaluate_volumes(&raids, &pools));
+    active.sort_by(|a, b| b.severity.cmp(&a.severity));
+
+    let crit_n = active.iter().filter(|a| a.severity == Severity::Critical).count();
+    let warn_n = active.iter().filter(|a| a.severity == Severity::Warning).count();
+
+    let status = if crit_n > 0 { "CRIT" } else if warn_n > 0 { "WARN" } else { "OK" };
+    println!(
+        "{} | devs:{} fs:{} arrays:{} | crit:{} warn:{}",
+        status, devices.len(), fs_list.len(), raids.len() + pools.len(), crit_n, warn_n
+    );
+
+    if crit_n > 0 {
+        std::process::exit(2);
+    } else if warn_n > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn run_diff(file_a: &str, file_b: &str) -> Result<()> {

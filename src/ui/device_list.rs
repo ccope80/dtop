@@ -3,6 +3,7 @@ use crate::models::smart::SmartStatus;
 use crate::ui::theme::Theme;
 use crate::util::health_score::{health_score, score_style, score_str};
 use crate::util::human::fmt_rate;
+use crate::util::ring_buffer::RingBuffer;
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
@@ -30,6 +31,7 @@ pub fn render_device_list(
     filter_label: &str,
     sort_label: &str,
     health_history: &HashMap<String, Vec<u8>>,
+    io_history: &HashMap<String, (RingBuffer, RingBuffer)>,
     theme: &Theme,
 ) {
     let border_style = if focused { theme.border_focused } else { theme.border };
@@ -37,8 +39,9 @@ pub fn render_device_list(
     let items: Vec<ListItem> = devices
         .iter()
         .map(|d| {
-            let hist = health_history.get(&d.name).map(|v| v.as_slice());
-            device_row(d, filter_active(d, filter_label), hist, theme)
+            let hist    = health_history.get(&d.name).map(|v| v.as_slice());
+            let io_hist = io_history.get(&d.name);
+            device_row(d, filter_active(d, filter_label), hist, io_hist, theme)
         })
         .collect();
 
@@ -72,6 +75,21 @@ pub fn render_device_list(
 
 const SPARKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
+fn io_spark(hist: Option<&RingBuffer>) -> String {
+    match hist {
+        None => "    ".to_string(),
+        Some(rb) => {
+            let samples = rb.last_n(4);
+            if samples.is_empty() {
+                "    ".to_string()
+            } else {
+                let max = samples.iter().copied().max().unwrap_or(1).max(1);
+                samples.iter().map(|&v| SPARKS[((v * 7) / max).min(7) as usize]).collect()
+            }
+        }
+    }
+}
+
 fn health_spark(hist: Option<&[u8]>) -> String {
     match hist {
         None | Some([]) => "     ".to_string(),
@@ -85,7 +103,7 @@ fn health_spark(hist: Option<&[u8]>) -> String {
     }
 }
 
-fn device_row(d: &BlockDevice, active: bool, hist: Option<&[u8]>, theme: &Theme) -> ListItem<'static> {
+fn device_row(d: &BlockDevice, active: bool, hist: Option<&[u8]>, io_hist: Option<&(RingBuffer, RingBuffer)>, theme: &Theme) -> ListItem<'static> {
     // When this device doesn't match the current filter, dim the entire row.
     if !active {
         let spans = vec![
@@ -136,6 +154,9 @@ fn device_row(d: &BlockDevice, active: bool, hist: Option<&[u8]>, theme: &Theme)
     let spark = health_spark(hist);
     let spark_style = score_style(health_score(d), theme);
 
+    let rspk = io_spark(io_hist.map(|p| &p.0));
+    let wspk = io_spark(io_hist.map(|p| &p.1));
+
     let spans = vec![
         Span::styled(format!("  {:<7}", d.name), theme.text),
         Span::styled(d.dev_type.label().to_string(), type_colour(d, theme)),
@@ -148,7 +169,11 @@ fn device_row(d: &BlockDevice, active: bool, hist: Option<&[u8]>, theme: &Theme)
         Span::styled("  ".to_string(), theme.text),
         Span::styled(util_bar, util_style),
         Span::styled(util_pct, util_style),
-        Span::styled(format!("  R:{:>9}  W:{:>9}", read_s, write_s), theme.text_dim),
+        Span::styled("  R".to_string(), theme.text_dim),
+        Span::styled(rspk, theme.read_spark),
+        Span::styled(format!(":{:>9}  W", read_s), theme.text_dim),
+        Span::styled(wspk, theme.write_spark),
+        Span::styled(format!(":{:>9}", write_s), theme.text_dim),
     ];
 
     ListItem::new(Line::from(spans))

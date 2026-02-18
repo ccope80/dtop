@@ -2,6 +2,7 @@ use crate::config::AlertConfig;
 use crate::models::device::BlockDevice;
 use crate::models::filesystem::Filesystem;
 use crate::models::smart::SmartStatus;
+use crate::models::volume::{RaidArray, ZfsPool};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -241,6 +242,53 @@ pub fn evaluate(devices: &[BlockDevice], filesystems: &[Filesystem], alert_cfg: 
     }
 
     // Sort: Critical first, then Warning, then Info
+    alerts.sort_by(|a, b| b.severity.cmp(&a.severity));
+    alerts
+}
+
+/// Evaluate software RAID and ZFS pool health.
+/// Returns alerts sorted Critical → Warning.
+pub fn evaluate_volumes(raids: &[RaidArray], pools: &[ZfsPool]) -> Vec<Alert> {
+    let mut alerts: Vec<Alert> = Vec::new();
+
+    for arr in raids {
+        if arr.state == "inactive" || arr.state == "failed" {
+            alerts.push(Alert {
+                severity: Severity::Critical,
+                device:   Some(arr.name.clone()),
+                mount:    None,
+                message:  format!("RAID {} state is {}", arr.level, arr.state),
+            });
+        } else if arr.degraded {
+            let rebuild = arr.rebuild_pct
+                .map(|p| format!(" (rebuilding {:.1}%)", p))
+                .unwrap_or_default();
+            // Degraded + rebuild in progress = Warning; degraded + no rebuild = Critical
+            let severity = if arr.rebuild_pct.is_some() { Severity::Warning } else { Severity::Critical };
+            alerts.push(Alert {
+                severity,
+                device:  Some(arr.name.clone()),
+                mount:   None,
+                message: format!("{} array degraded{}", arr.level, rebuild),
+            });
+        }
+    }
+
+    for pool in pools {
+        if !pool.is_healthy() {
+            let severity = match pool.health.as_str() {
+                "FAULTED" | "UNAVAIL" | "REMOVED" => Severity::Critical,
+                _                                  => Severity::Warning,
+            };
+            alerts.push(Alert {
+                severity,
+                device:  None,
+                mount:   Some(format!("zpool:{}", pool.name)),
+                message: format!("ZFS pool {} health: {}", pool.name, pool.health),
+            });
+        }
+    }
+
     alerts.sort_by(|a, b| b.severity.cmp(&a.severity));
     alerts
 }

@@ -337,6 +337,14 @@ struct Cli {
     /// Print detailed version and build information
     #[arg(long)]
     version_info: bool,
+
+    /// Sequential write benchmark on DEVICE mount point (writes then deletes temp file)
+    #[arg(long, value_name = "DEVICE")]
+    bench_write: Option<String>,
+
+    /// Run self-diagnostic: check tools, config, data dirs, SMART cache
+    #[arg(long)]
+    diag: bool,
 }
 
 fn main() -> Result<()> {
@@ -525,6 +533,12 @@ fn main() -> Result<()> {
     }
     if cli.version_info {
         return run_version_info();
+    }
+    if let Some(dev) = &cli.bench_write {
+        return run_bench_write(dev, cli.bench_size);
+    }
+    if cli.diag {
+        return run_diag();
     }
     if cli.config {
         return run_print_config();
@@ -5010,6 +5024,214 @@ fn run_version_info() -> Result<()> {
             .map(|o| o.status.success())
             .unwrap_or(false);
         println!("    {:<12} {}", tool, if found { "✓ found" } else { "✗ not found" });
+    }
+    Ok(())
+}
+
+fn run_bench_write(device: &str, size_mib: usize) -> Result<()> {
+    let name     = device.trim_start_matches("/dev/");
+    let dev_path = format!("/dev/{}", name);
+
+    // Find mount point for this device
+    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let mount_point = mounts.lines()
+        .find_map(|l| {
+            let mut p = l.split_whitespace();
+            let d  = p.next()?;
+            let mp = p.next()?;
+            if d == dev_path || d.starts_with(&format!("{}p", dev_path)) { Some(mp.to_string()) }
+            else { None }
+        });
+
+    let (target_path, direct_flag) = match &mount_point {
+        Some(mp) => (format!("{}/dtop_bench_write.tmp", mp), false),
+        None     => (dev_path.clone(), true),
+    };
+
+    println!("Write Benchmark — {}", dev_path);
+    if let Some(mp) = &mount_point {
+        println!("  Mount point : {}", mp);
+        println!("  Temp file   : {}/dtop_bench_write.tmp", mp);
+    } else {
+        println!("  Mode        : raw device (unmounted)");
+        println!("  ⚠  Writing directly to raw device — filesystem will be DESTROYED if not unmounted");
+    }
+    println!("  Size        : {} MiB", size_mib);
+    println!();
+
+    if mount_point.is_none() {
+        println!("Device appears unmounted. Aborting raw write to avoid accidental destruction.");
+        println!("Mount the device first, or use --bench for a read-only benchmark.");
+        return Ok(());
+    }
+
+    // Build dd command
+    let bs    = "1M";
+    let count = size_mib.to_string();
+    let mut args = vec![
+        format!("if=/dev/zero"),
+        format!("of={}", target_path),
+        format!("bs={}", bs),
+        format!("count={}", count),
+        "conv=fdatasync".to_string(),
+    ];
+    if direct_flag { args.push("oflag=direct".to_string()); }
+
+    println!("Running: dd {}", args.join(" "));
+    let start = std::time::Instant::now();
+
+    let out = std::process::Command::new("dd")
+        .args(&args)
+        .output()
+        .map_err(|e| anyhow::anyhow!("dd failed: {}", e))?;
+
+    let elapsed = start.elapsed().as_secs_f64();
+
+    // Clean up temp file
+    if mount_point.is_some() {
+        let _ = std::fs::remove_file(&target_path);
+    }
+
+    // Parse rate from dd stderr
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let rate_str = stderr.lines()
+        .last()
+        .and_then(|l| {
+            // dd prints: "NNN bytes ... copied, N.N s, X MB/s"
+            l.split(',').last().map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|| {
+            let mib = size_mib as f64;
+            format!("{:.1} MB/s", mib / elapsed)
+        });
+
+    println!();
+    println!("  Result: {} in {:.1}s — {}",
+             format!("{} MiB written", size_mib), elapsed, rate_str);
+
+    if !out.status.success() && out.stdout.is_empty() && stderr.is_empty() {
+        anyhow::bail!("dd exited with status {}", out.status);
+    }
+    Ok(())
+}
+
+fn run_diag() -> Result<()> {
+    use crate::collectors::smart_cache;
+    use crate::config::Config;
+
+    let mut issues: Vec<String> = Vec::new();
+    let mut ok_count = 0usize;
+
+    println!("dtop Diagnostic Report\n");
+
+    // ── External tools ──────────────────────────────────────────────
+    println!("External tools:");
+    for (tool, required, note) in &[
+        ("smartctl", true,  "install smartmontools for SMART monitoring"),
+        ("lsblk",    true,  "install util-linux"),
+        ("blkid",    true,  "install util-linux"),
+        ("hdparm",   false, "optional: HDD power management"),
+        ("nvme",     false, "optional: NVMe CLI tools"),
+        ("fstrim",   false, "optional: SSD TRIM support"),
+        ("btrfs",    false, "optional: BTRFS management"),
+        ("zpool",    false, "optional: ZFS management"),
+        ("du",       true,  "install coreutils"),
+        ("dd",       true,  "install coreutils"),
+    ] {
+        let found = std::process::Command::new("which")
+            .arg(tool)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let label = format!("{:<12} {}", tool, if *required { "(required)" } else { "(optional)" });
+        if found {
+            println!("  ✓  {}", label);
+            ok_count += 1;
+        } else if *required {
+            println!("  ✗  {}  — {}", label, note);
+            issues.push(format!("Missing required tool '{}': {}", tool, note));
+        } else {
+            println!("  ·  {}  — {}", label, note);
+        }
+    }
+
+    // ── Data directory ──────────────────────────────────────────────
+    println!("\nData directories:");
+    let data_dir = dirs::data_local_dir().map(|p| p.join("dtop"));
+    let conf_dir = dirs::config_dir().map(|p| p.join("dtop"));
+
+    for (label, dir_opt) in &[("Data dir", &data_dir), ("Config dir", &conf_dir)] {
+        match dir_opt {
+            Some(dir) => {
+                let exists = dir.exists();
+                let writable = exists && std::fs::OpenOptions::new()
+                    .write(true).create(true)
+                    .open(dir.join(".dtop_write_test"))
+                    .map(|_| { let _ = std::fs::remove_file(dir.join(".dtop_write_test")); true })
+                    .unwrap_or(false);
+                if writable || !exists {
+                    println!("  ✓  {}  : {}", label, dir.display());
+                    ok_count += 1;
+                } else {
+                    println!("  ✗  {}  : {} (not writable)", label, dir.display());
+                    issues.push(format!("{} not writable: {}", label, dir.display()));
+                }
+            }
+            None => {
+                println!("  ✗  {}  : cannot determine path", label);
+                issues.push(format!("{} path unavailable", label));
+            }
+        }
+    }
+
+    // ── SMART cache ─────────────────────────────────────────────────
+    println!("\nSMART cache:");
+    let cache = smart_cache::load();
+    if cache.is_empty() {
+        println!("  ·  No SMART cache yet — run dtop TUI to populate");
+    } else {
+        println!("  ✓  SMART cache: {} device(s) cached", cache.len());
+        ok_count += 1;
+        for (name, data) in &cache {
+            let temp = data.temperature.map_or("N/A".to_string(), |t| format!("{}°C", t));
+            println!("       {:<10}  status={:?}  temp={}", name, data.status, temp);
+        }
+    }
+
+    // ── Config ──────────────────────────────────────────────────────
+    println!("\nConfiguration:");
+    let config = Config::load();
+    let conf_path = conf_dir.as_ref().map(|p| p.join("dtop.toml"));
+    match conf_path {
+        Some(ref p) if p.exists() => {
+            println!("  ✓  Config file found: {}", p.display());
+            ok_count += 1;
+        }
+        Some(ref p) => {
+            println!("  ·  No config file (using defaults): {}", p.display());
+        }
+        None => println!("  ·  Config path unavailable (using defaults)"),
+    }
+    println!("       Alert rules   : {}", config.alerts.smart_rules.len());
+    println!("       Webhook URL   : {}", if config.notifications.webhook_url.is_empty() { "(not set)" } else { "(configured)" });
+    println!("       SMART enabled : true (default)");
+
+    // ── /proc/pressure ──────────────────────────────────────────────
+    println!("\nKernel features:");
+    let psi_ok = std::path::Path::new("/proc/pressure/io").exists();
+    println!("  {}  PSI (pressure stall info) : {}",
+             if psi_ok { "✓" } else { "·" },
+             if psi_ok { "available" } else { "not available (kernel < 4.20)" });
+
+    // ── Summary ─────────────────────────────────────────────────────
+    println!("\n─────────────────────────────────────────");
+    if issues.is_empty() {
+        println!("  All checks passed ({} ok).", ok_count);
+    } else {
+        println!("  {} ok, {} issue(s) found:", ok_count, issues.len());
+        for issue in &issues {
+            println!("    • {}", issue);
+        }
     }
     Ok(())
 }

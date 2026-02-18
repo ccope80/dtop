@@ -67,14 +67,22 @@ pub fn render(f: &mut Frame, app: &mut App) {
         _ => "",
     };
 
+    let theme_flash_str: String = match &app.theme_flash {
+        Some((t, name)) if t.elapsed() < std::time::Duration::from_secs(2) => {
+            format!("  ◈ Theme: {}  ", name)
+        }
+        _ => String::new(),
+    };
+
     let pad = (area.width as usize)
-        .saturating_sub(left.len() + alert_badge.len() + reload_flash.len() + right.len());
+        .saturating_sub(left.len() + alert_badge.len() + reload_flash.len() + theme_flash_str.len() + right.len());
 
     let header_line1 = Line::from(vec![
         Span::styled(left, theme.title),
         Span::styled(alert_badge, alert_style),
         Span::styled(" ".repeat(pad), theme.header),
         Span::styled(reload_flash, theme.ok),
+        Span::styled(theme_flash_str.clone(), theme.ok),
         Span::styled(right, theme.text_dim),
     ]);
 

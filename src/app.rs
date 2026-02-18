@@ -270,6 +270,9 @@ pub struct App {
     // Flash timestamp set when config hot-reloads; cleared after 3s display
     pub config_reload_flash: Option<Instant>,
 
+    // Flash (timestamp, theme_name) set when user cycles theme; cleared after 2s display
+    pub theme_flash: Option<(Instant, String)>,
+
     // Detail view: show SMART attribute descriptions (D key)
     pub detail_show_desc: bool,
 
@@ -370,6 +373,7 @@ impl App {
             show_config:         false,
             config_scroll:       0,
             config_reload_flash: None,
+            theme_flash:         None,
             detail_show_desc:    false,
             fs_usage_history:    HashMap::new(),
             nfs_rtt_history:     HashMap::new(),
@@ -619,6 +623,7 @@ impl App {
             Action::CycleTheme => {
                 self.theme_variant = self.theme_variant.next();
                 self.theme = Theme::for_variant(self.theme_variant);
+                self.theme_flash = Some((Instant::now(), self.theme_variant.name().to_string()));
                 user_state::UserState {
                     theme_name:    self.theme_variant.name().to_string(),
                     layout_preset: self.layout_preset,

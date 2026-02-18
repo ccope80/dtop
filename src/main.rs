@@ -293,6 +293,14 @@ struct Cli {
     /// Print I/O pressure stall info (PSI) and per-device I/O wait stats
     #[arg(long)]
     io_pressure: bool,
+
+    /// Print page cache and buffer stats from /proc/meminfo
+    #[arg(long)]
+    cache_stats: bool,
+
+    /// Report write barrier / FUA status for DEVICE (or all devices)
+    #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
+    write_barrier: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -444,6 +452,13 @@ fn main() -> Result<()> {
     }
     if cli.io_pressure {
         return run_io_pressure();
+    }
+    if cli.cache_stats {
+        return run_cache_stats();
+    }
+    if let Some(dev_or_all) = &cli.write_barrier {
+        let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
+        return run_write_barrier(dev);
     }
     if cli.config {
         return run_print_config();
@@ -4017,6 +4032,146 @@ fn run_io_pressure() -> Result<()> {
     for (name, rops, wops, rms, wms) in &rows {
         println!("{:<12}  {:>12}  {:>12}  {:>12}ms  {:>12}ms",
                  name, rops, wops, rms, wms);
+    }
+    Ok(())
+}
+
+fn run_cache_stats() -> Result<()> {
+    use crate::util::human::fmt_bytes;
+
+    let meminfo = std::fs::read_to_string("/proc/meminfo")
+        .map_err(|e| anyhow::anyhow!("Cannot read /proc/meminfo: {}", e))?;
+
+    let mut fields: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    for line in meminfo.lines() {
+        if let Some((key, rest)) = line.split_once(':') {
+            let val_kb: u64 = rest.split_whitespace().next()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            fields.insert(key.trim(), val_kb * 1024);
+        }
+    }
+
+    let get = |k: &str| fields.get(k).copied().unwrap_or(0);
+
+    let mem_total   = get("MemTotal");
+    let mem_free    = get("MemFree");
+    let mem_avail   = get("MemAvailable");
+    let cached      = get("Cached");
+    let buffers     = get("Buffers");
+    let slab        = get("Slab");
+    let s_reclaimable = get("SReclaimable");
+    let dirty       = get("Dirty");
+    let writeback   = get("Writeback");
+    let swap_total  = get("SwapTotal");
+    let swap_free   = get("SwapFree");
+
+    let used        = mem_total.saturating_sub(mem_avail);
+    let cache_total = cached + buffers + s_reclaimable;
+    let cache_pct   = if mem_total > 0 { cache_total as f64 / mem_total as f64 * 100.0 } else { 0.0 };
+
+    println!("Memory & Cache Statistics\n");
+    println!("  {:<22} {}", "Total RAM:",       fmt_bytes(mem_total));
+    println!("  {:<22} {} ({:.1}%)", "Used:",   fmt_bytes(used),        used as f64 / mem_total.max(1) as f64 * 100.0);
+    println!("  {:<22} {}", "Available:",       fmt_bytes(mem_avail));
+    println!("  {:<22} {}", "Free:",            fmt_bytes(mem_free));
+    println!();
+    println!("  Page Cache & Buffers");
+    println!("  {:<22} {} ({:.1}% of RAM)", "Page cache:",   fmt_bytes(cached),        cached as f64 / mem_total.max(1) as f64 * 100.0);
+    println!("  {:<22} {}", "Buffers:",         fmt_bytes(buffers));
+    println!("  {:<22} {}", "Slab (total):",    fmt_bytes(slab));
+    println!("  {:<22} {} (reclaimable)", "Slab reclaimable:", fmt_bytes(s_reclaimable));
+    println!("  {:<22} {} ({:.1}% of RAM)", "Cache total:",  fmt_bytes(cache_total),   cache_pct);
+    println!();
+    println!("  Write-back pressure");
+    println!("  {:<22} {}", "Dirty pages:",     fmt_bytes(dirty));
+    println!("  {:<22} {}", "Writeback:",       fmt_bytes(writeback));
+    if swap_total > 0 {
+        let swap_used = swap_total.saturating_sub(swap_free);
+        println!();
+        println!("  Swap");
+        println!("  {:<22} {}", "Swap total:", fmt_bytes(swap_total));
+        println!("  {:<22} {} ({:.1}%)", "Swap used:",
+                 fmt_bytes(swap_used), swap_used as f64 / swap_total as f64 * 100.0);
+    }
+
+    // vm.dirty_ratio / vm.dirty_background_ratio tunables
+    println!();
+    println!("  vm tunables (sysctl)");
+    for key in &["vm.dirty_ratio", "vm.dirty_background_ratio",
+                 "vm.dirty_expire_centisecs", "vm.dirty_writeback_centisecs"] {
+        let val = std::process::Command::new("sysctl")
+            .args(["-n", key])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|| "?".to_string());
+        println!("  {:<38} {}", format!("{}:", key), val);
+    }
+    Ok(())
+}
+
+fn run_write_barrier(device: Option<&str>) -> Result<()> {
+    let mut devs: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/sys/block") {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("zram") { continue; }
+            if name.chars().last().map_or(false, |c| c.is_ascii_digit()) { continue; }
+            if let Some(d) = device {
+                if name != d.trim_start_matches("/dev/") { continue; }
+            }
+            devs.push(name);
+        }
+    }
+    devs.sort();
+
+    let mounts_text = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+
+    println!("{:<12}  {:<10}  {:<12}  {:<10}  Notes",
+             "Device", "Write Cache", "FUA support", "nobarrier");
+    println!("{}", "─".repeat(68));
+
+    for dev in &devs {
+        let sysfs = format!("/sys/block/{}", dev);
+
+        // Write cache enabled?
+        let write_cache = std::fs::read_to_string(format!("{}/queue/write_cache", sysfs))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "?".to_string());
+
+        // FUA support
+        let fua = std::fs::read_to_string(format!("{}/queue/fua", sysfs))
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false);
+
+        // Check mounts for nobarrier / barrier options
+        let dev_path = format!("/dev/{}", dev);
+        let nobarrier = mounts_text.lines().any(|l| {
+            let mut p = l.split_whitespace();
+            let d = p.next().unwrap_or("");
+            let _ = p.next();
+            let _ = p.next();
+            let opts = p.next().unwrap_or("");
+            d.starts_with(&dev_path) && opts.split(',').any(|o| o == "nobarrier")
+        });
+
+        let note = if write_cache.contains("write back") && !fua && nobarrier {
+            "⚠ data loss risk: write-back cache, no FUA, nobarrier"
+        } else if write_cache.contains("write back") && !fua {
+            "write-back cache without FUA — power-loss risk"
+        } else if nobarrier {
+            "nobarrier mount — faster but unsafe on power loss"
+        } else {
+            "ok"
+        };
+
+        println!("{:<12}  {:<10}  {:<12}  {:<10}  {}",
+                 dev,
+                 write_cache.replace(" ", "-"),
+                 if fua { "yes" } else { "no" },
+                 if nobarrier { "yes" } else { "no" },
+                 note);
     }
     Ok(())
 }

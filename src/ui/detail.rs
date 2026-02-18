@@ -189,6 +189,17 @@ fn temp_sparkline(rb: &RingBuffer, width: usize) -> (String, u64, u64) {
 }
 
 fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[Filesystem], scroll: usize, smart_test_status: Option<&str>, anomalies: Option<&DeviceAnomalies>, baseline: Option<&Baseline>, endurance: Option<&DeviceEndurance>, show_desc: bool, theme: &Theme) {
+    // Split the area: 1 line for tab bar, rest for scrollable content
+    let tab_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    let tab_area     = tab_chunks[0];
+    let content_area = tab_chunks[1];
+
     let mut lines: Vec<Line> = Vec::new();
 
     // ── Device info ───────────────────────────────────────────────────
@@ -588,10 +599,28 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[F
         lines.push(Line::from(vec![]));
     }
 
+    // Tab bar: determine active section based on scroll position
+    let total_lines = lines.len();
+    let smart_end = (total_lines * 6 / 10).max(1);
+    let io_end    = (total_lines * 85 / 100).max(smart_end + 1);
+    let active_tab = if scroll < smart_end { 0 }
+                     else if scroll < io_end { 1 }
+                     else { 2 };
+    let tabs = ["SMART", "I/O", "Temp"];
+    let tab_spans: Vec<Span> = tabs.iter().enumerate().flat_map(|(i, &name)| {
+        let style = if i == active_tab { theme.title } else { theme.text_dim };
+        vec![
+            Span::styled(format!(" {} ", name), style),
+            Span::styled("│", theme.border),
+        ]
+    }).collect();
+    let tab_line = Line::from(tab_spans);
+    f.render_widget(Paragraph::new(tab_line), tab_area);
+
     let para = Paragraph::new(lines)
         .scroll((scroll as u16, 0))
         .wrap(Wrap { trim: false });
-    f.render_widget(para, area);
+    f.render_widget(para, content_area);
 }
 
 /// Compare `curr_value` for `attr_id` against `smart_prev`, return (arrow, style).

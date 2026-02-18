@@ -1,0 +1,31 @@
+[Unit]
+Description=dtop disk health daemon
+Documentation=https://github.com/ccope80/dtop
+After=network.target
+
+[Service]
+Type=simple
+# Adjust the path to the dtop binary as needed.
+ExecStart=/usr/local/bin/dtop --daemon --interval 30000
+Restart=on-failure
+RestartSec=10
+
+# Run as an unprivileged user; grant read access to block devices via a
+# supplementary group (e.g. 'disk') rather than running as root.
+# User=dtop
+# Group=disk
+
+# Harden the service (optional but recommended).
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/log/dtop /var/lib/dtop
+
+# Override data/log paths if you want system-wide (non-user) directories.
+# By default dtop writes to ~/.local/share/dtop/ — when running as a system
+# service you will likely want to set XDG_DATA_HOME / XDG_CONFIG_HOME.
+# Environment=XDG_DATA_HOME=/var/lib/dtop
+# Environment=XDG_CONFIG_HOME=/etc/dtop
+
+[Install]
+WantedBy=multi-user.target

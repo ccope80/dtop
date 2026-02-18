@@ -10,25 +10,41 @@ use ratatui::{
     Frame,
 };
 
+fn filter_active(d: &BlockDevice, filter_label: &str) -> bool {
+    match filter_label {
+        "NVMe" => d.dev_type == DeviceType::NVMe,
+        "SSD"  => d.dev_type == DeviceType::SSD,
+        "HDD"  => d.dev_type == DeviceType::HDD,
+        _      => true,
+    }
+}
+
 pub fn render_device_list(
     f: &mut Frame,
     area: Rect,
     devices: &[BlockDevice],
     state: &mut ListState,
     focused: bool,
+    filter_label: &str,
     theme: &Theme,
 ) {
     let border_style = if focused { theme.border_focused } else { theme.border };
 
     let items: Vec<ListItem> = devices
         .iter()
-        .map(|d| device_row(d, theme))
+        .map(|d| device_row(d, filter_active(d, filter_label), theme))
         .collect();
+
+    let title = if filter_label == "All" {
+        format!("1 Devices  ({} total)", devices.len())
+    } else {
+        format!("1 Devices  [f: {}]  ({} shown)", filter_label, devices.len())
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(Span::styled("1 Devices", theme.title));
+        .title(Span::styled(title, theme.title));
 
     let list = List::new(items)
         .block(block)
@@ -38,7 +54,20 @@ pub fn render_device_list(
     f.render_stateful_widget(list, area, state);
 }
 
-fn device_row(d: &BlockDevice, theme: &Theme) -> ListItem<'static> {
+fn device_row(d: &BlockDevice, active: bool, theme: &Theme) -> ListItem<'static> {
+    // When this device doesn't match the current filter, dim the entire row.
+    if !active {
+        let spans = vec![
+            Span::styled(format!("  {:<7}", d.name), theme.text_dim),
+            Span::styled(format!("{} ", d.dev_type.label()), theme.text_dim),
+            Span::styled("·".to_string(), theme.text_dim),
+            Span::styled(format!("  ---  ", ), theme.text_dim),
+            Span::styled("░░░░░░░░".to_string(), theme.text_dim),
+            Span::styled("  -%".to_string(), theme.text_dim),
+        ];
+        return ListItem::new(Line::from(spans));
+    }
+
     // Health indicator dot
     let (dot, dot_style) = match d.smart_status() {
         SmartStatus::Unknown => ("·", theme.text_dim),

@@ -23,6 +23,33 @@ use std::time::{Duration, Instant};
 // ── View / Panel enums ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum DeviceFilter {
+    All,
+    NVMe,
+    Ssd,
+    Hdd,
+}
+
+impl DeviceFilter {
+    pub fn next(&self) -> Self {
+        match self {
+            DeviceFilter::All  => DeviceFilter::NVMe,
+            DeviceFilter::NVMe => DeviceFilter::Ssd,
+            DeviceFilter::Ssd  => DeviceFilter::Hdd,
+            DeviceFilter::Hdd  => DeviceFilter::All,
+        }
+    }
+    pub fn label(&self) -> &'static str {
+        match self {
+            DeviceFilter::All  => "All",
+            DeviceFilter::NVMe => "NVMe",
+            DeviceFilter::Ssd  => "SSD",
+            DeviceFilter::Hdd  => "HDD",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum ActiveView {
     Dashboard,
     ProcessIO,
@@ -43,7 +70,6 @@ pub enum ActivePanel {
 
 // ── Tick intervals ────────────────────────────────────────────────────
 
-const FAST_TICK:    Duration = Duration::from_millis(2000);
 const SLOW_TICK:    Duration = Duration::from_millis(30_000);
 const SMART_TICK:   Duration = Duration::from_secs(300);
 const POLL_TIMEOUT: Duration = Duration::from_millis(150);
@@ -84,6 +110,15 @@ pub struct App {
 
     // Help overlay
     pub show_help: bool,
+
+    // Device list filter (f key)
+    pub device_filter: DeviceFilter,
+
+    // Tick interval (wired from --interval)
+    fast_tick: Duration,
+
+    // SMART enabled (wired from --no-smart)
+    smart_enabled: bool,
 
     // Dashboard state
     pub device_list_state: ListState,
@@ -150,7 +185,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(initial_theme: ThemeVariant) -> Result<Self> {
+    pub fn new(initial_theme: ThemeVariant, interval_ms: u64, smart_enabled: bool) -> Result<Self> {
         let (smart_tx, smart_rx) = mpsc::channel();
         let (bench_tx, bench_rx) = mpsc::channel();
         let config = Config::load();
@@ -163,6 +198,9 @@ impl App {
             active_panel:  ActivePanel::Devices,
             layout_preset: 0,
             show_help:     false,
+            device_filter: DeviceFilter::All,
+            fast_tick:     Duration::from_millis(interval_ms.max(500)),
+            smart_enabled,
             device_list_state:     ListState::default(),
             device_list_area:      None,
             detail_open:           false,
@@ -187,7 +225,7 @@ impl App {
             prev_diskstats:  HashMap::new(),
             prev_process_io: HashMap::new(),
             uid_cache:       HashMap::new(),
-            last_fast_tick:  Instant::now() - FAST_TICK,
+            last_fast_tick:  Instant::now() - Duration::from_millis(interval_ms.max(500)),
             last_slow_tick:  Instant::now() - SLOW_TICK,
             last_smart_tick: Instant::now() - SMART_TICK,
             smart_tx,
@@ -214,7 +252,7 @@ impl App {
             }
         }
 
-        app.schedule_all_smart();
+        if app.smart_enabled { app.schedule_all_smart(); }
 
         if !app.devices.is_empty() {
             app.device_list_state.select(Some(0));
@@ -273,7 +311,7 @@ impl App {
 
             if self.should_quit { break; }
 
-            if self.last_fast_tick.elapsed() >= FAST_TICK {
+            if self.last_fast_tick.elapsed() >= self.fast_tick {
                 let prev_alerts = self.alerts.clone();
                 self.collect_fast()?;
                 self.last_fast_tick = Instant::now();
@@ -290,7 +328,7 @@ impl App {
                 self.last_slow_tick = Instant::now();
             }
 
-            if self.last_smart_tick.elapsed() >= SMART_TICK {
+            if self.smart_enabled && self.last_smart_tick.elapsed() >= SMART_TICK {
                 self.schedule_all_smart();
                 self.last_smart_tick = Instant::now();
             }
@@ -463,6 +501,15 @@ impl App {
                 }
             }
 
+            Action::FilterDevices => {
+                if !self.detail_open {
+                    self.device_filter = self.device_filter.next();
+                    // Re-select first visible device after filter change
+                    let first = self.filtered_device_indices().into_iter().next();
+                    self.device_list_state.select(first);
+                }
+            }
+
             Action::SmartTest => {
                 if self.detail_open {
                     if let Some(idx) = self.device_list_state.selected() {
@@ -558,6 +605,26 @@ impl App {
         let cur  = self.device_list_state.selected().unwrap_or(0) as i32;
         let next = (cur + delta).clamp(0, self.devices.len() as i32 - 1) as usize;
         self.device_list_state.select(Some(next));
+    }
+
+    /// Indices into self.devices that match the current device_filter.
+    pub fn filtered_device_indices(&self) -> Vec<usize> {
+        use crate::models::device::DeviceType;
+        self.devices.iter().enumerate().filter_map(|(i, d)| {
+            let matches = match &self.device_filter {
+                DeviceFilter::All  => true,
+                DeviceFilter::NVMe => d.dev_type == DeviceType::NVMe,
+                DeviceFilter::Ssd  => d.dev_type == DeviceType::SSD,
+                DeviceFilter::Hdd  => d.dev_type == DeviceType::HDD,
+            };
+            if matches { Some(i) } else { None }
+        }).collect()
+    }
+
+    /// Filtered slice of devices for the device list panel.
+    pub fn filtered_devices(&self) -> Vec<&crate::models::device::BlockDevice> {
+        let idxs = self.filtered_device_indices();
+        idxs.iter().map(|&i| &self.devices[i]).collect()
     }
 
     // ── Fast data collection (2 s) ────────────────────────────────────

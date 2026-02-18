@@ -23,6 +23,7 @@ pub enum Action {
     ViewNfs,       // F5: NFS / network mount latency view
     Benchmark,     // b: run quick read benchmark on selected device
     SmartTest,     // x: schedule SMART short self-test on selected device
+    FilterDevices, // f: cycle device type filter (All/NVMe/SSD/HDD)
     None,
 }
 
@@ -64,6 +65,7 @@ pub fn handle_key(key: KeyEvent) -> Action {
         // Device actions (detail view)
         (KeyCode::Char('b'), _) => Action::Benchmark,
         (KeyCode::Char('x'), _) => Action::SmartTest,
+        (KeyCode::Char('f'), _) => Action::FilterDevices,
 
         _ => Action::None,
     }

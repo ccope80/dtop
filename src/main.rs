@@ -41,6 +41,10 @@ struct Cli {
     /// Print a human-readable health report and exit
     #[arg(long)]
     report: bool,
+
+    /// Run as a headless daemon (no TUI): poll data, evaluate alerts, write log & webhook
+    #[arg(long)]
+    daemon: bool,
 }
 
 fn main() -> Result<()> {
@@ -52,6 +56,9 @@ fn main() -> Result<()> {
     if cli.report {
         return run_report();
     }
+    if cli.daemon {
+        return run_daemon(cli.interval, !cli.no_smart);
+    }
 
     let initial_theme = ui::theme::ThemeVariant::from_name(&cli.theme);
 
@@ -61,7 +68,7 @@ fn main() -> Result<()> {
         original_hook(info);
     }));
 
-    let result = run(initial_theme);
+    let result = run(initial_theme, cli.interval, !cli.no_smart);
     restore_terminal()?;
     result
 }
@@ -140,7 +147,66 @@ fn run_report() -> Result<()> {
     Ok(())
 }
 
-fn run(initial_theme: ui::theme::ThemeVariant) -> Result<()> {
+fn run_daemon(interval_ms: u64, smart_enabled: bool) -> Result<()> {
+    use collectors::{filesystem, smart as smart_collector};
+    use models::device::BlockDevice;
+    use util::{alert_log, webhook};
+
+    eprintln!("dtop daemon starting (interval {}ms, SMART {})…",
+        interval_ms, if smart_enabled { "enabled" } else { "disabled" });
+
+    let cfg = config::Config::load();
+    let mut prev_alerts: Vec<alerts::Alert> = Vec::new();
+    let tick = std::time::Duration::from_millis(interval_ms.max(500));
+
+    loop {
+        let lsblk_devs = collectors::lsblk::run_lsblk().unwrap_or_default();
+        let raw_stats  = collectors::diskstats::read_diskstats().unwrap_or_default();
+        let fs_list    = filesystem::read_filesystems().unwrap_or_default();
+
+        let devices: Vec<BlockDevice> = lsblk_devs.iter()
+            .filter(|lb| !cfg.devices.exclude.iter().any(|pat| {
+                if let Some(p) = pat.strip_suffix('*') { lb.name.starts_with(p) }
+                else { pat == &lb.name }
+            }))
+            .filter(|lb| raw_stats.contains_key(&lb.name))
+            .map(|lb| {
+                let mut dev = BlockDevice::new(lb.name.clone());
+                dev.model = lb.model.clone(); dev.serial = lb.serial.clone();
+                dev.capacity_bytes = lb.size; dev.rotational = lb.rotational;
+                dev.transport = lb.transport.clone(); dev.partitions = lb.partitions.clone();
+                dev.infer_type();
+                if smart_enabled { dev.smart = smart_collector::poll_device(&lb.name); }
+                dev
+            })
+            .collect();
+
+        let new_alerts = alerts::evaluate(&devices, &fs_list, &cfg.alerts.thresholds);
+        let now = chrono::Local::now().format("%H:%M:%S").to_string();
+        let mut fresh: Vec<alerts::Alert> = Vec::new();
+        for alert in &new_alerts {
+            let key = format!("{}{}{}", alert.severity.label(), alert.prefix(), alert.message);
+            if !prev_alerts.iter().any(|a| {
+                format!("{}{}{}", a.severity.label(), a.prefix(), a.message) == key
+            }) {
+                fresh.push(alert.clone());
+            }
+        }
+        if !fresh.is_empty() {
+            alert_log::append(&fresh);
+            if !cfg.notifications.webhook_url.is_empty() {
+                webhook::notify(&fresh, &cfg.notifications.webhook_url, cfg.notifications.notify_warning);
+            }
+            for a in &fresh {
+                eprintln!("{} [{}] {}{}", now, a.severity.label(), a.prefix(), a.message);
+            }
+        }
+        prev_alerts = new_alerts;
+        std::thread::sleep(tick);
+    }
+}
+
+fn run(initial_theme: ui::theme::ThemeVariant, interval_ms: u64, smart_enabled: bool) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -148,7 +214,7 @@ fn run(initial_theme: ui::theme::ThemeVariant) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut term = Terminal::new(backend)?;
 
-    let mut app = App::new(initial_theme)?;
+    let mut app = App::new(initial_theme, interval_ms, smart_enabled)?;
     app.run(&mut term)?;
 
     Ok(())

@@ -82,7 +82,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         app.device_list_area = Some(cols[0]);
         render_device_list(
             f, cols[0], &app.devices, &mut app.device_list_state,
-            app.active_panel == ActivePanel::Devices, &theme,
+            app.active_panel == ActivePanel::Devices, app.device_filter.label(), &theme,
         );
 
         if let Some(idx) = app.device_list_state.selected() {
@@ -127,7 +127,7 @@ fn render_preset_full(f: &mut Frame, body: ratatui::layout::Rect, app: &mut App,
     app.device_list_area = Some(top[0]);
     render_device_list(
         f, top[0], &app.devices, &mut app.device_list_state,
-        app.active_panel == ActivePanel::Devices, theme,
+        app.active_panel == ActivePanel::Devices, app.device_filter.label(), theme,
     );
     render_throughput(
         f, top[1], &app.devices,
@@ -170,7 +170,7 @@ fn render_preset_io_focus(f: &mut Frame, body: ratatui::layout::Rect, app: &mut 
     app.device_list_area = Some(top[0]);
     render_device_list(
         f, top[0], &app.devices, &mut app.device_list_state,
-        app.active_panel == ActivePanel::Devices, theme,
+        app.active_panel == ActivePanel::Devices, app.device_filter.label(), theme,
     );
     render_throughput(
         f, top[1], &app.devices,
@@ -194,7 +194,7 @@ fn render_preset_storage(f: &mut Frame, body: ratatui::layout::Rect, app: &mut A
     app.device_list_area = Some(cols[0]);
     render_device_list(
         f, cols[0], &app.devices, &mut app.device_list_state,
-        app.active_panel == ActivePanel::Devices, theme,
+        app.active_panel == ActivePanel::Devices, app.device_filter.label(), theme,
     );
     render_filesystem_bars(
         f, cols[1], &app.filesystems, app.fs_scroll,
@@ -213,7 +213,7 @@ fn render_compact(f: &mut Frame, body: ratatui::layout::Rect, app: &mut App, the
     app.device_list_area = Some(rows[0]);
     render_device_list(
         f, rows[0], &app.devices, &mut app.device_list_state,
-        app.active_panel == ActivePanel::Devices, theme,
+        app.active_panel == ActivePanel::Devices, app.device_filter.label(), theme,
     );
     render_filesystem_bars(
         f, rows[1], &app.filesystems, app.fs_scroll,

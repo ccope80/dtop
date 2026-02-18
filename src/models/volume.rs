@@ -58,11 +58,12 @@ pub struct LvmState {
 
 #[derive(Debug, Clone)]
 pub struct ZfsPool {
-    pub name:        String,
-    pub size_bytes:  u64,
-    pub alloc_bytes: u64,
-    pub free_bytes:  u64,
-    pub health:      String,   // "ONLINE", "DEGRADED", "FAULTED", ...
+    pub name:         String,
+    pub size_bytes:   u64,
+    pub alloc_bytes:  u64,
+    pub free_bytes:   u64,
+    pub health:       String,   // "ONLINE", "DEGRADED", "FAULTED", ...
+    pub scrub_status: String,   // e.g. "ok (2026-02-09)", "scrubbing 66.7%", "no scrub"
 }
 
 impl ZfsPool {

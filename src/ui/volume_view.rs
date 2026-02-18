@@ -207,6 +207,11 @@ fn render_zfs(f: &mut Frame, area: Rect, app: &App) {
 
         let health_style = if pool.is_healthy() { theme.ok } else { theme.crit };
 
+        let scrub_style = if pool.scrub_status.starts_with("ok") { theme.ok }
+                          else if pool.scrub_status.starts_with("scrubbing") { theme.warn }
+                          else if pool.scrub_status.starts_with("canceled") { theme.warn }
+                          else { theme.text_dim };
+
         lines.push(Line::from(vec![
             Span::styled(format!("  {:<12}", pool.name), theme.title),
             Span::styled(format!("{:<9}", pool.health), health_style),
@@ -219,6 +224,10 @@ fn render_zfs(f: &mut Frame, area: Rect, app: &App) {
                     fmt_bytes(pool.free_bytes)),
                 theme.text_dim,
             ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("    scrub: ", theme.text_dim),
+            Span::styled(pool.scrub_status.clone(), scrub_style),
         ]));
     }
 

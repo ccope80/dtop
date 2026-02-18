@@ -1,4 +1,4 @@
-use crate::config::AlertThresholds;
+use crate::config::AlertConfig;
 use crate::models::device::BlockDevice;
 use crate::models::filesystem::Filesystem;
 use crate::models::smart::SmartStatus;
@@ -43,7 +43,8 @@ impl Alert {
 
 /// Evaluate all alert conditions against current state.
 /// Returns a freshly built list sorted Critical → Warning → Info.
-pub fn evaluate(devices: &[BlockDevice], filesystems: &[Filesystem], thr: &AlertThresholds) -> Vec<Alert> {
+pub fn evaluate(devices: &[BlockDevice], filesystems: &[Filesystem], alert_cfg: &AlertConfig) -> Vec<Alert> {
+    let thr   = &alert_cfg.thresholds;
     let mut alerts: Vec<Alert> = Vec::new();
 
     for dev in devices {
@@ -98,32 +99,26 @@ pub fn evaluate(devices: &[BlockDevice], filesystems: &[Filesystem], thr: &Alert
                 }
             }
 
-            // Pending sectors (ID 197)
-            let pending = smart.attributes.iter()
-                .find(|a| a.id == 197)
-                .map(|a| a.raw_value)
-                .unwrap_or(0);
-            if pending > 0 {
-                alerts.push(Alert {
-                    severity: Severity::Warning,
-                    device:   Some(dev.name.clone()),
-                    mount:    None,
-                    message:  format!("{} pending sector(s) detected", pending),
-                });
-            }
-
-            // Reallocated sectors (ID 5)
-            let realloc = smart.attributes.iter()
-                .find(|a| a.id == 5)
-                .map(|a| a.raw_value)
-                .unwrap_or(0);
-            if realloc > 0 {
-                alerts.push(Alert {
-                    severity: Severity::Warning,
-                    device:   Some(dev.name.clone()),
-                    mount:    None,
-                    message:  format!("{} reallocated sector(s)", realloc),
-                });
+            // Configurable SMART attribute rules (replaces hard-coded ID 5 / 197 checks)
+            for rule in &alert_cfg.smart_rules {
+                if let Some(attr) = smart.attributes.iter().find(|a| a.id == rule.attr) {
+                    if rule.matches(attr.raw_value) {
+                        let severity = match rule.severity.as_str() {
+                            "crit" | "critical" => Severity::Critical,
+                            _                   => Severity::Warning,
+                        };
+                        let message = match &rule.message {
+                            Some(m) => m.clone(),
+                            None    => format!("{} (attr {}) raw={}", attr.name, rule.attr, attr.raw_value),
+                        };
+                        alerts.push(Alert {
+                            severity,
+                            device:  Some(dev.name.clone()),
+                            mount:   None,
+                            message,
+                        });
+                    }
+                }
             }
 
             // Pre-fail attribute degradation since last poll

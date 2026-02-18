@@ -97,6 +97,20 @@ pub fn render_config_overlay(f: &mut Frame, config: &Config, theme: &Theme) {
     right.push(Line::from(""));
     right.push(hdr("Data directory", theme));
     right.push(dim(&data_dir, theme));
+    right.push(Line::from(""));
+    right.push(hdr("SMART alert rules", theme));
+    let rules_str = if config.alerts.smart_rules.is_empty() {
+        "0 rules (all disabled)".to_string()
+    } else {
+        let w = config.alerts.smart_rules.iter().filter(|r| r.severity == "warn").count();
+        let c = config.alerts.smart_rules.iter().filter(|r| r.severity != "warn").count();
+        format!("{} rule(s) — {} warn / {} crit", config.alerts.smart_rules.len(), w, c)
+    };
+    right.push(dim(&rules_str, theme));
+    for rule in &config.alerts.smart_rules {
+        let msg = rule.message.as_deref().unwrap_or("(auto)");
+        right.push(dim(&format!("  attr {:>3}  {} {}  [{}]  {}", rule.attr, rule.op, rule.value, rule.severity, msg), theme));
+    }
 
     f.render_widget(Paragraph::new(left).wrap(Wrap { trim: false }), cols[0]);
     f.render_widget(Paragraph::new(right).wrap(Wrap { trim: false }), cols[1]);

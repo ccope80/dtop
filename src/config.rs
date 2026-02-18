@@ -34,6 +34,57 @@ pub struct AlertConfig {
     /// Suppress re-alerting the same condition for this many hours (0 = no cooldown).
     #[serde(default)]
     pub cooldown_hours: u64,
+    /// Per-attribute SMART alert rules evaluated against raw values.
+    #[serde(default = "SmartAlertRule::defaults")]
+    pub smart_rules: Vec<SmartAlertRule>,
+}
+
+/// A configurable SMART attribute alert rule.
+///
+/// Example in dtop.toml:
+/// ```toml
+/// [[alerts.smart_rules]]
+/// attr     = 5       # Reallocated Sectors
+/// op       = "gt"    # gt, gte, lt, lte, eq, ne
+/// value    = 0
+/// severity = "warn"  # "warn" or "crit"
+/// # message = "custom override"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartAlertRule {
+    /// SMART attribute ID (e.g. 5=reallocated, 197=pending, 198=uncorrectable)
+    pub attr: u32,
+    /// Comparison operator applied to the attribute's raw value: "gt", "gte", "lt", "lte", "eq", "ne"
+    pub op: String,
+    /// Threshold value
+    pub value: u64,
+    /// "warn" or "crit"
+    pub severity: String,
+    /// Optional custom message; None = auto-generated from attr name + raw value
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+impl SmartAlertRule {
+    pub fn defaults() -> Vec<Self> {
+        vec![
+            SmartAlertRule { attr: 5,   op: "gt".into(), value: 0, severity: "warn".into(), message: None },
+            SmartAlertRule { attr: 197, op: "gt".into(), value: 0, severity: "warn".into(), message: None },
+            SmartAlertRule { attr: 198, op: "gt".into(), value: 0, severity: "crit".into(), message: None },
+        ]
+    }
+
+    pub fn matches(&self, raw_value: u64) -> bool {
+        match self.op.as_str() {
+            "gt"  | ">"  => raw_value >  self.value,
+            "gte" | ">=" => raw_value >= self.value,
+            "lt"  | "<"  => raw_value <  self.value,
+            "lte" | "<=" => raw_value <= self.value,
+            "eq"  | "==" => raw_value == self.value,
+            "ne"  | "!=" => raw_value != self.value,
+            _             => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,7 +144,11 @@ impl Default for GeneralConfig {
 
 impl Default for AlertConfig {
     fn default() -> Self {
-        Self { thresholds: AlertThresholds::default(), cooldown_hours: 0 }
+        Self {
+            thresholds:   AlertThresholds::default(),
+            cooldown_hours: 0,
+            smart_rules:  SmartAlertRule::defaults(),
+        }
     }
 }
 

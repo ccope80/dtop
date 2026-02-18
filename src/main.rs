@@ -61,6 +61,14 @@ struct Cli {
     /// Print config file path and current values, then exit
     #[arg(long)]
     config: bool,
+
+    /// Compare two JSON snapshots (--json output): dtop --diff a.json b.json
+    #[arg(long, num_args = 2, value_names = ["FILE_A", "FILE_B"])]
+    diff: Option<Vec<String>>,
+
+    /// Print shell completion script and exit (bash, zsh, fish, elvish, powershell)
+    #[arg(long, value_name = "SHELL")]
+    completions: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -80,6 +88,12 @@ fn main() -> Result<()> {
     }
     if cli.config {
         return run_print_config();
+    }
+    if let Some(files) = &cli.diff {
+        return run_diff(&files[0], &files[1]);
+    }
+    if let Some(shell) = &cli.completions {
+        return run_completions(shell);
     }
     if cli.daemon {
         return run_daemon(cli.interval, !cli.no_smart);
@@ -185,8 +199,9 @@ fn run_json_snapshot() -> Result<()> {
 
 fn run_report() -> Result<()> {
     use util::report;
+    let cfg = config::Config::load();
     let (devices, filesystems) = report::collect_snapshot();
-    let alerts = alerts::evaluate(&devices, &filesystems, &config::Config::load().alerts.thresholds);
+    let alerts = alerts::evaluate(&devices, &filesystems, &cfg.alerts);
     print!("{}", report::generate(&devices, &filesystems, &alerts));
     Ok(())
 }
@@ -282,7 +297,7 @@ fn run_check(smart_enabled: bool) -> Result<()> {
         })
         .collect();
 
-    let active_alerts = alerts::evaluate(&devices, &fs_list, &cfg.alerts.thresholds);
+    let active_alerts = alerts::evaluate(&devices, &fs_list, &cfg.alerts);
     let has_crit = active_alerts.iter().any(|a| a.severity == Severity::Critical);
     let has_warn = active_alerts.iter().any(|a| a.severity == Severity::Warning);
 
@@ -338,7 +353,7 @@ fn run_daemon(interval_ms: u64, smart_enabled: bool) -> Result<()> {
             })
             .collect();
 
-        let new_alerts = alerts::evaluate(&devices, &fs_list, &cfg.alerts.thresholds);
+        let new_alerts = alerts::evaluate(&devices, &fs_list, &cfg.alerts);
         let now = chrono::Local::now().format("%H:%M:%S").to_string();
         let mut fresh: Vec<alerts::Alert> = Vec::new();
         for alert in &new_alerts {
@@ -361,6 +376,154 @@ fn run_daemon(interval_ms: u64, smart_enabled: bool) -> Result<()> {
         prev_alerts = new_alerts;
         std::thread::sleep(tick);
     }
+}
+
+fn run_diff(file_a: &str, file_b: &str) -> Result<()> {
+    use serde_json::Value;
+    use util::human::fmt_bytes;
+
+    let json_a: Value = serde_json::from_str(&std::fs::read_to_string(file_a)?)?;
+    let json_b: Value = serde_json::from_str(&std::fs::read_to_string(file_b)?)?;
+
+    let ts_a = json_a["timestamp"].as_str().unwrap_or("?");
+    let ts_b = json_b["timestamp"].as_str().unwrap_or("?");
+    println!("Comparing snapshots:");
+    println!("  A: {} ({})", file_a, ts_a);
+    println!("  B: {} ({})", file_b, ts_b);
+
+    let empty: Vec<Value> = vec![];
+    let devs_a = json_a["devices"].as_array().unwrap_or(&empty);
+    let devs_b = json_b["devices"].as_array().unwrap_or(&empty);
+
+    println!("\nDEVICES");
+    for dev_b in devs_b {
+        let name  = dev_b["name"].as_str().unwrap_or("?");
+        let model = dev_b["model"].as_str().unwrap_or("");
+
+        let dev_a = devs_a.iter().find(|d| d["name"].as_str() == Some(name));
+        if dev_a.is_none() {
+            println!("  {:<10} {}  [NEW]", name, model);
+            continue;
+        }
+        let dev_a = dev_a.unwrap();
+        let sm_a  = &dev_a["smart"];
+        let sm_b  = &dev_b["smart"];
+
+        let mut changes: Vec<String> = Vec::new();
+
+        // SMART status
+        if let (Some(s_a), Some(s_b)) = (sm_a["status"].as_str(), sm_b["status"].as_str()) {
+            if s_a != s_b {
+                changes.push(format!("SMART status:  {} → {}", s_a, s_b));
+            }
+        }
+
+        // Temperature
+        if let (Some(t_a), Some(t_b)) = (sm_a["temperature"].as_i64(), sm_b["temperature"].as_i64()) {
+            if t_a != t_b {
+                changes.push(format!("Temperature:   {}°C → {}°C  ({:+})", t_a, t_b, t_b - t_a));
+            }
+        }
+
+        // Power-on hours
+        if let (Some(p_a), Some(p_b)) = (sm_a["power_on_hours"].as_u64(), sm_b["power_on_hours"].as_u64()) {
+            if p_a != p_b {
+                changes.push(format!("Power-on hrs:  {} → {}  ({:+}h)", p_a, p_b, p_b as i64 - p_a as i64));
+            }
+        }
+
+        // SMART attributes (raw value deltas)
+        if let (Some(attrs_a), Some(attrs_b)) = (sm_a["attributes"].as_array(), sm_b["attributes"].as_array()) {
+            for attr_b in attrs_b {
+                let id     = attr_b["id"].as_u64().unwrap_or(0);
+                let aname  = attr_b["name"].as_str().unwrap_or("?");
+                let raw_b  = attr_b["raw_value"].as_u64().unwrap_or(0);
+
+                if let Some(attr_a) = attrs_a.iter().find(|a| a["id"].as_u64() == Some(id)) {
+                    let raw_a = attr_a["raw_value"].as_u64().unwrap_or(0);
+                    if raw_a != raw_b {
+                        changes.push(format!(
+                            "Attr {:>3} {:<30} raw {} → {}  ({:+})",
+                            id, format!("({})", aname), raw_a, raw_b, raw_b as i64 - raw_a as i64
+                        ));
+                    }
+                } else {
+                    changes.push(format!("Attr {:>3} ({})  [new] raw={}", id, aname, raw_b));
+                }
+            }
+        }
+
+        // Capacity change
+        if let (Some(cap_a), Some(cap_b)) = (dev_a["capacity"].as_u64(), dev_b["capacity"].as_u64()) {
+            if cap_a != cap_b {
+                changes.push(format!("Capacity:  {} → {}", fmt_bytes(cap_a), fmt_bytes(cap_b)));
+            }
+        }
+
+        if changes.is_empty() {
+            println!("  {:<10} {}  (no changes)", name, model);
+        } else {
+            println!("  {:<10} {}", name, model);
+            for c in &changes {
+                println!("    {}", c);
+            }
+        }
+    }
+
+    for dev_a in devs_a {
+        let name = dev_a["name"].as_str().unwrap_or("?");
+        if !devs_b.iter().any(|d| d["name"].as_str() == Some(name)) {
+            println!("  {:<10}  [REMOVED]", name);
+        }
+    }
+
+    let fs_a = json_a["filesystems"].as_array().unwrap_or(&empty);
+    let fs_b = json_b["filesystems"].as_array().unwrap_or(&empty);
+
+    println!("\nFILESYSTEMS");
+    for fsb in fs_b {
+        let mp    = fsb["mountpoint"].as_str().unwrap_or("?");
+        let pct_b = fsb["use_pct"].as_f64().unwrap_or(0.0);
+        if let Some(fsa) = fs_a.iter().find(|f| f["mountpoint"].as_str() == Some(mp)) {
+            let pct_a = fsa["use_pct"].as_f64().unwrap_or(0.0);
+            let delta = pct_b - pct_a;
+            if delta.abs() >= 0.1 {
+                println!("  {:<24}  {:.0}% → {:.0}%  ({:+.1}pp)", mp, pct_a, pct_b, delta);
+            } else {
+                println!("  {:<24}  {:.0}%  (no change)", mp, pct_b);
+            }
+        } else {
+            println!("  {:<24}  {:.0}%  [NEW]", mp, pct_b);
+        }
+    }
+    for fsa in fs_a {
+        let mp = fsa["mountpoint"].as_str().unwrap_or("?");
+        if !fs_b.iter().any(|f| f["mountpoint"].as_str() == Some(mp)) {
+            println!("  {:<24}  [REMOVED]", mp);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_completions(shell: &str) -> Result<()> {
+    use clap::CommandFactory;
+    use clap_complete::{generate, shells::{Bash, Elvish, Fish, PowerShell, Zsh}};
+
+    let mut cmd = Cli::command();
+    let mut out = io::stdout();
+    match shell {
+        "bash"       => generate(Bash,       &mut cmd, "dtop", &mut out),
+        "zsh"        => generate(Zsh,        &mut cmd, "dtop", &mut out),
+        "fish"       => generate(Fish,       &mut cmd, "dtop", &mut out),
+        "elvish"     => generate(Elvish,     &mut cmd, "dtop", &mut out),
+        "powershell" => generate(PowerShell, &mut cmd, "dtop", &mut out),
+        other => {
+            eprintln!("Unknown shell '{}'. Valid: bash, zsh, fish, elvish, powershell", other);
+            std::process::exit(1);
+        }
+    }
+    Ok(())
 }
 
 fn run(initial_theme: ui::theme::ThemeVariant, interval_ms: u64, smart_enabled: bool) -> Result<()> {

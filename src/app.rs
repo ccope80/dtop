@@ -441,7 +441,7 @@ impl App {
                 self.last_fast_tick = Instant::now();
                 let new_alerts = alerts::evaluate(
                     &self.devices, &self.filesystems,
-                    &self.config.alerts.thresholds,
+                    &self.config.alerts,
                 );
                 self.update_alert_history(&prev_alerts, &new_alerts);
                 self.alerts = new_alerts;

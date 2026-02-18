@@ -269,6 +269,14 @@ struct Cli {
     /// Print current temperature for all devices from SMART cache (no polling)
     #[arg(long)]
     disk_temps: bool,
+
+    /// Print model, serial, and firmware for all devices (or one DEVICE) from SMART cache
+    #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
+    disk_model: Option<String>,
+
+    /// Grow the filesystem on DEVICE to fill its partition (resize2fs/xfs_growfs/btrfs resize)
+    #[arg(long, value_name = "DEVICE")]
+    growfs: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -400,6 +408,13 @@ fn main() -> Result<()> {
     }
     if cli.disk_temps {
         return run_disk_temps();
+    }
+    if let Some(dev_or_all) = &cli.disk_model {
+        let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
+        return run_disk_model(dev);
+    }
+    if let Some(dev) = &cli.growfs {
+        return run_growfs(dev);
     }
     if cli.config {
         return run_print_config();
@@ -3477,6 +3492,154 @@ fn run_disk_temps() -> Result<()> {
 
     if rows.is_empty() {
         println!("  No temperature data in SMART cache.");
+    }
+    Ok(())
+}
+
+fn run_disk_model(device: Option<&str>) -> Result<()> {
+    use crate::collectors::smart_cache;
+
+    let cache = smart_cache::load();
+
+    // Also gather sysfs model/vendor info for any device not in cache
+    let mut sysfs_names: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/sys/block") {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("loop") || name.starts_with("ram") { continue; }
+            sysfs_names.push(name);
+        }
+    }
+    sysfs_names.sort();
+
+    struct Row { name: String, model: String, serial: String, firmware: String, capacity: String }
+    let mut rows: Vec<Row> = Vec::new();
+
+    let names: Vec<String> = match device {
+        Some(d) => vec![d.trim_start_matches("/dev/").to_string()],
+        None    => {
+            let mut all: std::collections::HashSet<String> = sysfs_names.iter().cloned().collect();
+            for k in cache.keys() { all.insert(k.clone()); }
+            let mut v: Vec<String> = all.into_iter().collect();
+            v.sort();
+            v
+        }
+    };
+
+    for name in &names {
+        let _smart = cache.get(name);
+
+        // sysfs paths
+        let sysfs_base = format!("/sys/block/{}", name);
+        let read_sysfs = |sub: &str| -> String {
+            std::fs::read_to_string(format!("{}/{}", sysfs_base, sub))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        };
+
+        // Try smartctl JSON for accurate model/serial/firmware
+        let smartctl_out = std::process::Command::new("smartctl")
+            .args(["--json=c", "-i", &format!("/dev/{}", name)])
+            .output();
+
+        let (model, serial, firmware, capacity) = if let Ok(out) = smartctl_out {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                let model    = v["model_name"].as_str().unwrap_or("").to_string();
+                let serial   = v["serial_number"].as_str().unwrap_or("").to_string();
+                let firmware = v["firmware_version"].as_str().unwrap_or("").to_string();
+                let cap_bytes = v["user_capacity"]["bytes"].as_u64().unwrap_or(0);
+                let cap = if cap_bytes > 0 {
+                    crate::util::human::fmt_bytes(cap_bytes)
+                } else {
+                    String::new()
+                };
+                (model, serial, firmware, cap)
+            } else {
+                (read_sysfs("device/model"), String::new(), read_sysfs("device/rev"), String::new())
+            }
+        } else {
+            (read_sysfs("device/model"), String::new(), read_sysfs("device/rev"), String::new())
+        };
+
+        rows.push(Row {
+            name:     name.clone(),
+            model:    if model.is_empty()    { "—".to_string() } else { model },
+            serial:   if serial.is_empty()   { "—".to_string() } else { serial },
+            firmware: if firmware.is_empty() { "—".to_string() } else { firmware },
+            capacity: if capacity.is_empty() { "—".to_string() } else { capacity },
+        });
+    }
+
+    if rows.is_empty() {
+        println!("No block devices found.");
+        return Ok(());
+    }
+
+    println!("{:<8}  {:<35}  {:<20}  {:<8}  {}", "Device", "Model", "Serial", "Firmware", "Capacity");
+    println!("{}", "─".repeat(90));
+    for r in &rows {
+        println!("{:<8}  {:<35}  {:<20}  {:<8}  {}", r.name, r.model, r.serial, r.firmware, r.capacity);
+    }
+    Ok(())
+}
+
+fn run_growfs(device: &str) -> Result<()> {
+    let name     = device.trim_start_matches("/dev/");
+    let dev_path = format!("/dev/{}", name);
+
+    // Detect FS type
+    let blkid = std::process::Command::new("blkid")
+        .args(["-o", "value", "-s", "TYPE", &dev_path])
+        .output()
+        .map_err(|e| anyhow::anyhow!("blkid failed: {}", e))?;
+    let fstype = String::from_utf8_lossy(&blkid.stdout).trim().to_string();
+
+    // Find the mount point (if mounted)
+    let mounts_text = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let mount_point = mounts_text.lines()
+        .find(|l| l.split_whitespace().next() == Some(&dev_path))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .map(|s| s.to_string());
+
+    println!("Growing filesystem on {} (type: {})…", dev_path, if fstype.is_empty() { "unknown" } else { &fstype });
+    if let Some(ref mp) = mount_point {
+        println!("  Mount point: {}", mp);
+    }
+    println!();
+
+    let status = match fstype.as_str() {
+        "ext2" | "ext3" | "ext4" => {
+            // resize2fs works on device directly (may need e2fsck -f first if unmounted)
+            println!("  Running: resize2fs {}", dev_path);
+            std::process::Command::new("resize2fs")
+                .arg(&dev_path)
+                .status()
+                .map_err(|e| anyhow::anyhow!("resize2fs not found: {}", e))?
+        }
+        "xfs" => {
+            let target = mount_point.as_deref().unwrap_or(&dev_path);
+            println!("  Running: xfs_growfs {}", target);
+            std::process::Command::new("xfs_growfs")
+                .arg(target)
+                .status()
+                .map_err(|e| anyhow::anyhow!("xfs_growfs not found: {}", e))?
+        }
+        "btrfs" => {
+            let target = mount_point.as_deref().unwrap_or(&dev_path);
+            println!("  Running: btrfs filesystem resize max {}", target);
+            std::process::Command::new("btrfs")
+                .args(["filesystem", "resize", "max", target])
+                .status()
+                .map_err(|e| anyhow::anyhow!("btrfs not found: {}", e))?
+        }
+        "" => anyhow::bail!("Could not detect filesystem type on {} — is it formatted?", dev_path),
+        other => anyhow::bail!("Unsupported filesystem '{}' for online grow (try resize2fs/xfs_growfs/btrfs manually)", other),
+    };
+
+    if status.success() {
+        println!("\nFilesystem grown successfully.");
+    } else {
+        anyhow::bail!("Grow command exited with status {}", status);
     }
     Ok(())
 }

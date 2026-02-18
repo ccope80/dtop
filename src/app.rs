@@ -261,7 +261,8 @@ pub struct App {
     pub alert_log_searching: bool,
 
     // Config overlay (C key)
-    pub show_config: bool,
+    pub show_config:   bool,
+    pub config_scroll: usize,
 
     // Flash timestamp set when config hot-reloads; cleared after 3s display
     pub config_reload_flash: Option<Instant>,
@@ -359,6 +360,7 @@ impl App {
             alert_log_search:    String::new(),
             alert_log_searching: false,
             show_config:         false,
+            config_scroll:       0,
             config_reload_flash: None,
             detail_show_desc:    false,
             fs_usage_history:    HashMap::new(),
@@ -444,7 +446,7 @@ impl App {
                 }
                 if show_config {
                     use crate::ui::config_overlay::render_config_overlay;
-                    render_config_overlay(f, &self.config, &theme_snap);
+                    render_config_overlay(f, &self.config, self.config_scroll, &theme_snap);
                 }
                 if bench_state != BenchmarkState::Idle {
                     benchmark_popup::render(f, &bench_state, &theme_snap);
@@ -578,6 +580,12 @@ impl App {
             match action {
                 Action::Quit => self.should_quit = true,
                 Action::ShowConfig | Action::Back => { self.show_config = false; }
+                Action::SelectUp | Action::ScrollUp => {
+                    self.config_scroll = self.config_scroll.saturating_sub(1);
+                }
+                Action::SelectDown | Action::ScrollDown => {
+                    self.config_scroll += 1;
+                }
                 _ => {}
             }
             return;
@@ -588,7 +596,10 @@ impl App {
 
             Action::ShowHelp => { self.show_help = true; self.help_scroll = 0; }
 
-            Action::ShowConfig => { self.show_config = !self.show_config; }
+            Action::ShowConfig => {
+                self.show_config = !self.show_config;
+                if self.show_config { self.config_scroll = 0; }
+            }
 
             Action::ToggleDesc => {
                 if self.detail_open { self.detail_show_desc = !self.detail_show_desc; }

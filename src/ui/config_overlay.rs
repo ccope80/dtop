@@ -7,14 +7,14 @@ use ratatui::{
     Frame,
 };
 
-pub fn render_config_overlay(f: &mut Frame, config: &Config, theme: &Theme) {
+pub fn render_config_overlay(f: &mut Frame, config: &Config, scroll: usize, theme: &Theme) {
     let area = centered_rect(76, 38, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.border_focused)
-        .title(Span::styled(" DTop — Current Config  (C to close) ", theme.title));
+        .title(Span::styled(" DTop — Current Config  (C to close)  [↑↓ scroll] ", theme.title));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -118,8 +118,8 @@ pub fn render_config_overlay(f: &mut Frame, config: &Config, theme: &Theme) {
         right.push(dim(&format!("  attr {:>3}  {} {}  [{}]  {}", rule.attr, rule.op, rule.value, rule.severity, msg), theme));
     }
 
-    f.render_widget(Paragraph::new(left).wrap(Wrap { trim: false }), cols[0]);
-    f.render_widget(Paragraph::new(right).wrap(Wrap { trim: false }), cols[1]);
+    f.render_widget(Paragraph::new(left).wrap(Wrap { trim: false }).scroll((scroll as u16, 0)), cols[0]);
+    f.render_widget(Paragraph::new(right).wrap(Wrap { trim: false }).scroll((scroll as u16, 0)), cols[1]);
 }
 
 fn hdr(title: &str, theme: &Theme) -> Line<'static> {

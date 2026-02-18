@@ -120,7 +120,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
             if let Some(dev) = app.devices.get(idx) {
                 let test_status = app.smart_test_status.get(&dev.name).map(|s| s.as_str());
                 let anomalies   = app.smart_anomalies.get(&dev.name);
-                render_detail(f, cols[1], dev, &app.filesystems, app.detail_scroll, app.detail_history_window, test_status, anomalies, &theme);
+                let baseline    = app.smart_baselines.get(&dev.name).map(|b| b as &_);
+                render_detail(f, cols[1], dev, &app.filesystems, app.detail_scroll, app.detail_history_window, test_status, anomalies, baseline, &theme);
             }
         }
     } else if area.width < 100 {

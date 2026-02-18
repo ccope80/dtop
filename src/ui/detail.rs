@@ -5,6 +5,7 @@ use crate::ui::theme::Theme;
 use crate::util::health_score::{health_score, score_style};
 use crate::util::human::{fmt_bytes, fmt_duration_short, fmt_iops, fmt_pct, fmt_rate};
 use crate::util::smart_anomaly::{self, DeviceAnomalies};
+use crate::util::smart_baseline::Baseline;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
@@ -29,6 +30,7 @@ pub fn render_detail(
     history_window: usize,
     smart_test_status: Option<&str>,
     anomalies: Option<&DeviceAnomalies>,
+    baseline: Option<&Baseline>,
     theme: &Theme,
 ) {
     let win_label = WINDOWS[history_window.min(2)].1;
@@ -61,7 +63,7 @@ pub fn render_detail(
         .split(inner);
 
     render_sparklines(f, sections[0], device, history_window, theme);
-    render_info(f, sections[1], device, filesystems, scroll, smart_test_status, anomalies, theme);
+    render_info(f, sections[1], device, filesystems, scroll, smart_test_status, anomalies, baseline, theme);
 }
 
 fn render_sparklines(f: &mut Frame, area: Rect, device: &BlockDevice, history_window: usize, theme: &Theme) {
@@ -167,7 +169,7 @@ fn lat_style(ms: f64, theme: &Theme) -> Style {
     else               { theme.crit }
 }
 
-fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[Filesystem], scroll: usize, smart_test_status: Option<&str>, anomalies: Option<&DeviceAnomalies>, theme: &Theme) {
+fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[Filesystem], scroll: usize, smart_test_status: Option<&str>, anomalies: Option<&DeviceAnomalies>, baseline: Option<&Baseline>, theme: &Theme) {
     let mut lines: Vec<Line> = Vec::new();
 
     // ── Device info ───────────────────────────────────────────────────
@@ -247,6 +249,57 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[F
         lines.push(Line::from(vec![
             Span::styled("  SMART test: ", theme.text_dim),
             Span::styled(status.to_string(), theme.ok),
+        ]));
+        lines.push(Line::from(vec![]));
+    }
+
+    // ── SMART Baseline Δ ──────────────────────────────────────────────
+    if let Some(bl) = baseline {
+        lines.push(section_header("── SMART Baseline Δ ", theme));
+        lines.push(Line::from(vec![
+            Span::styled("  Saved        ", theme.text_dim),
+            Span::styled(bl.saved_date.clone(), theme.text),
+        ]));
+        // Power-on hours delta
+        if let (Some(bl_poh), Some(curr_poh)) = (
+            bl.power_on_hours,
+            device.smart.as_ref().and_then(|s| s.power_on_hours),
+        ) {
+            let delta = curr_poh as i64 - bl_poh as i64;
+            let delta_str = format!("{} h → {} h  (Δ {:+})", bl_poh, curr_poh, delta);
+            lines.push(Line::from(vec![
+                Span::styled("  Power On Hrs  ", theme.text_dim),
+                Span::styled(delta_str, theme.text),
+            ]));
+        }
+        // Key attributes: 5=Reallocated, 197=Pending, 198=Uncorrectable
+        for (id, label) in &[(5u32, "Reallocated"), (197u32, "Pending Sectors"), (198u32, "Uncorrectable")] {
+            if let Some(curr_attr) = device.smart.as_ref()
+                .and_then(|s| s.attributes.iter().find(|a| a.id == *id))
+            {
+                if let Some((base_raw, delta)) = bl.attr_delta(*id, curr_attr.raw_value) {
+                    let delta_style = if delta > 0 { theme.warn } else { theme.ok };
+                    let delta_str = format!(
+                        "baseline: {}  now: {}  (Δ {:+})",
+                        base_raw, curr_attr.raw_value, delta
+                    );
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("  {:<15}", label), theme.text_dim),
+                        Span::styled(delta_str, delta_style),
+                    ]));
+                }
+            }
+        }
+        lines.push(Line::from(vec![
+            Span::styled("  Press B to update baseline", theme.text_dim),
+        ]));
+        lines.push(Line::from(vec![]));
+    } else if device.smart.is_some() {
+        // Prompt to create baseline when SMART data is available but no baseline exists
+        lines.push(Line::from(vec![
+            Span::styled("  No SMART baseline — press ", theme.text_dim),
+            Span::styled("B", theme.ok),
+            Span::styled(" to save one", theme.text_dim),
         ]));
         lines.push(Line::from(vec![]));
     }

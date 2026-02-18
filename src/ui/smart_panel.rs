@@ -78,11 +78,28 @@ pub fn render_smart_panel(
             .map(|h| format!("  {}h", h))
             .unwrap_or_default();
 
+        // 8-char ASCII temperature sparkline from temp_history
+        const SPARKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let temp_spark: String = {
+            let samples = dev.temp_history.last_n(8);
+            if samples.is_empty() {
+                "        ".to_string()
+            } else {
+                let max = samples.iter().copied().max().unwrap_or(1).max(1);
+                samples.iter().map(|&v| {
+                    let idx = ((v * 7) / max).min(7) as usize;
+                    SPARKS[idx]
+                }).collect()
+            }
+        };
+
         lines.push(Line::from(vec![
             Span::styled(format!("  {:<8}", dev.name), theme.text),
             Span::styled(temp_str, temp_style),
             Span::styled("  ", theme.text),
             Span::styled(temp_bar, temp_style),
+            Span::styled("  ", theme.text_dim),
+            Span::styled(temp_spark, temp_style),
             Span::styled(status_label, status_style),
             Span::styled(poh_str, theme.text_dim),
         ]));

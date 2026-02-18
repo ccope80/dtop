@@ -81,16 +81,34 @@ fn main() -> Result<()> {
 }
 
 fn run_json_snapshot() -> Result<()> {
-    use collectors::{filesystem, lsblk, nfs};
+    use collectors::{filesystem, lsblk, nfs, smart_cache};
     use serde_json::{json, Value};
     use util::human::fmt_bytes;
 
-    let lsblk_devs = lsblk::run_lsblk().unwrap_or_default();
-    let fs_list    = filesystem::read_filesystems().unwrap_or_default();
-    let nfs_mounts = nfs::read_nfs_mounts();
+    let lsblk_devs  = lsblk::run_lsblk().unwrap_or_default();
+    let fs_list     = filesystem::read_filesystems().unwrap_or_default();
+    let nfs_mounts  = nfs::read_nfs_mounts();
+    let smart_cache = smart_cache::load();
 
     // Build device array
     let devices: Vec<Value> = lsblk_devs.iter().map(|dev| {
+        let smart = smart_cache.get(&dev.name).map(|s| {
+            json!({
+                "status":         s.status.label().trim(),
+                "temperature":    s.temperature,
+                "power_on_hours": s.power_on_hours,
+                "attributes": s.attributes.iter().map(|a| json!({
+                    "id":        a.id,
+                    "name":      a.name,
+                    "value":     a.value,
+                    "worst":     a.worst,
+                    "thresh":    a.thresh,
+                    "raw_value": a.raw_value,
+                    "prefail":   a.prefail,
+                    "at_risk":   a.is_at_risk(),
+                })).collect::<Vec<_>>(),
+            })
+        });
         json!({
             "name":        dev.name,
             "model":       dev.model,
@@ -99,6 +117,7 @@ fn run_json_snapshot() -> Result<()> {
             "capacity_hr": fmt_bytes(dev.size),
             "rotational":  dev.rotational,
             "transport":   dev.transport,
+            "smart":       smart,
         })
     }).collect();
 

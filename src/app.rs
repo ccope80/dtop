@@ -1,6 +1,6 @@
 use crate::alerts::{self, Alert};
 use crate::collectors::{diskstats, filesystem, lsblk, lvm, mdraid, nfs, process_io, smart as smart_collector, smart_cache, zfs};
-use crate::util::{alert_log, smart_anomaly, webhook};
+use crate::util::{alert_log, smart_anomaly, smart_baseline, webhook};
 use crate::config::Config;
 use crate::ui::benchmark_popup;
 use crate::input::{handle_key, Action};
@@ -221,6 +221,9 @@ pub struct App {
     // Alert acknowledgment — keys of alerts the operator has seen this session
     pub acked_alerts: HashSet<String>,
 
+    // SMART baselines — per-device saved reference points (B key in detail)
+    pub smart_baselines: HashMap<String, smart_baseline::Baseline>,
+
     // Filesystem usage history for fill-rate computation: mount → [(Instant, used_bytes)]
     fs_usage_history: HashMap<String, VecDeque<(Instant, u64)>>,
 
@@ -283,6 +286,7 @@ impl App {
             smart_anomalies:   smart_anomaly::load(),
             alert_fired_at:    HashMap::new(),
             acked_alerts:      HashSet::new(),
+            smart_baselines:   HashMap::new(),
             fs_usage_history:  HashMap::new(),
             should_quit:   false,
         };
@@ -306,6 +310,20 @@ impl App {
         if !app.devices.is_empty() {
             app.device_list_state.select(Some(0));
         }
+
+        // Load SMART baselines for all known devices
+        for dev in &app.devices {
+            if let Some(b) = smart_baseline::load(&dev.name) {
+                app.smart_baselines.insert(dev.name.clone(), b);
+            }
+        }
+
+        // Pre-populate alert history from persistent log (last 50 entries)
+        let recent = alert_log::load_recent(50);
+        for entry in recent.into_iter().rev() {
+            app.alert_history.push_back(entry);
+        }
+
         Ok(app)
     }
 
@@ -595,6 +613,22 @@ impl App {
                 // Acknowledge all current alerts — dims them in the panel and clears the badge
                 for a in &self.alerts {
                     self.acked_alerts.insert(a.key());
+                }
+            }
+
+            Action::SaveBaseline => {
+                // Save current SMART data as baseline for the selected device (detail view)
+                if self.detail_open && self.smart_enabled {
+                    if let Some(idx) = self.device_list_state.selected() {
+                        if let Some(dev) = self.devices.get(idx) {
+                            if let Some(smart) = &dev.smart {
+                                smart_baseline::save(&dev.name, smart);
+                                if let Some(b) = smart_baseline::load(&dev.name) {
+                                    self.smart_baselines.insert(dev.name.clone(), b);
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

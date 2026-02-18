@@ -1,7 +1,7 @@
 use crate::alerts::{self, Alert};
 use crate::collectors::{diskstats, filesystem, lsblk, lvm, mdraid, nfs, pressure, process_io, smart as smart_collector, smart_cache, zfs};
 use crate::collectors::pressure::SystemPressure;
-use crate::util::{alert_log, health_history, notify, smart_anomaly, smart_baseline, user_state, webhook, write_endurance};
+use crate::util::{ack_store, alert_log, health_history, notify, smart_anomaly, smart_baseline, user_state, webhook, write_endurance};
 use crate::config::Config;
 use crate::ui::benchmark_popup;
 use crate::input::{handle_key, Action};
@@ -341,7 +341,7 @@ impl App {
             smart_test_status: HashMap::new(),
             smart_anomalies:   smart_anomaly::load(),
             alert_fired_at:    HashMap::new(),
-            acked_alerts:      HashSet::new(),
+            acked_alerts:      ack_store::load(),
             smart_baselines:   HashMap::new(),
             health_history:    health_history::load(),
             write_endurance:   write_endurance::load(),
@@ -744,6 +744,7 @@ impl App {
                 for a in &self.alerts {
                     self.acked_alerts.insert(a.key());
                 }
+                ack_store::save(&self.acked_alerts);
             }
 
             Action::SaveBaseline => {

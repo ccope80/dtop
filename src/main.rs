@@ -81,6 +81,10 @@ struct Cli {
     /// Print a rolling status snapshot every N seconds (0 = once and exit)
     #[arg(long, value_name = "SECS")]
     watch: Option<u64>,
+
+    /// Open config file in $EDITOR (creates default if missing)
+    #[arg(long)]
+    edit_config: bool,
 }
 
 fn main() -> Result<()> {
@@ -115,6 +119,9 @@ fn main() -> Result<()> {
     }
     if let Some(secs) = cli.watch {
         return run_watch(secs, !cli.no_smart);
+    }
+    if cli.edit_config {
+        return run_edit_config();
     }
     if cli.daemon {
         return run_daemon(cli.interval, !cli.no_smart);
@@ -255,7 +262,21 @@ fn run_print_config() -> Result<()> {
     println!("  io_util_warn_pct      = {}%", t.io_util_warn_pct);
     println!("  latency_warn_ms       = {}ms", t.latency_warn_ms);
     println!("  latency_crit_ms       = {}ms", t.latency_crit_ms);
+    let fw = if t.fill_days_warn > 0.0 { format!("{:.0}d", t.fill_days_warn) } else { "disabled".into() };
+    let fc = if t.fill_days_crit > 0.0 { format!("{:.0}d", t.fill_days_crit) } else { "disabled".into() };
+    println!("  fill_days_warn        = {}", fw);
+    println!("  fill_days_crit        = {}", fc);
     println!("  cooldown_hours        = {}", cfg.alerts.cooldown_hours);
+    println!("");
+    if cfg.alerts.smart_rules.is_empty() {
+        println!("[alerts.smart_rules]  (none configured — all disabled)");
+    } else {
+        println!("[alerts.smart_rules]  ({} rules)", cfg.alerts.smart_rules.len());
+        for r in &cfg.alerts.smart_rules {
+            let msg = r.message.as_deref().unwrap_or("(auto)");
+            println!("  attr {:>3}  {} {}  [{}]  {}", r.attr, r.op, r.value, r.severity, msg);
+        }
+    }
     println!("");
     println!("[devices]");
     println!("  exclude = {:?}", cfg.devices.exclude);
@@ -272,6 +293,7 @@ fn run_print_config() -> Result<()> {
     println!("  webhook_url    = {}", webhook);
     println!("  notify_critical = {}", cfg.notifications.notify_critical);
     println!("  notify_warning  = {}", cfg.notifications.notify_warning);
+    println!("  notify_send     = {}", cfg.notifications.notify_send);
     Ok(())
 }
 
@@ -458,6 +480,30 @@ fn run_summary(smart_enabled: bool) -> Result<()> {
         std::process::exit(2);
     } else if warn_n > 0 {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn run_edit_config() -> Result<()> {
+    let path = match config::Config::config_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("Cannot determine config directory.");
+            std::process::exit(1);
+        }
+    };
+    // Bootstrap default config if none exists yet
+    if !path.exists() {
+        config::Config::load(); // triggers try_write_defaults() internally
+        println!("Created default config: {}", path.display());
+    }
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| "vi".to_string());
+    println!("Opening {} with {}…", path.display(), editor);
+    let status = std::process::Command::new(&editor).arg(&path).status()?;
+    if !status.success() {
+        eprintln!("{} exited non-zero", editor);
     }
     Ok(())
 }

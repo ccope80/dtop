@@ -153,6 +153,22 @@ struct Cli {
     /// Send a test notification to the configured webhook URL and exit
     #[arg(long)]
     test_webhook: bool,
+
+    /// View or set I/O scheduler: --io-sched (all), DEVICE (one), DEVICE=SCHEDULER (set)
+    #[arg(long, value_name = "DEVICE[=SCHEDULER]", num_args = 0..=1, default_missing_value = "ALL")]
+    io_sched: Option<String>,
+
+    /// List devices by temperature, hottest first (reads SMART cache; no polling)
+    #[arg(long)]
+    top_temp: bool,
+
+    /// Spin down an HDD to standby mode via hdparm (requires root + hdparm)
+    #[arg(long, value_name = "DEVICE")]
+    spindown: Option<String>,
+
+    /// Use deep sleep (hdparm -Y) instead of standby (hdparm -y) with --spindown
+    #[arg(long)]
+    sleep_mode: bool,
 }
 
 fn main() -> Result<()> {
@@ -203,6 +219,16 @@ fn main() -> Result<()> {
     }
     if cli.test_webhook {
         return run_test_webhook();
+    }
+    if let Some(arg) = &cli.io_sched {
+        let target = if arg == "ALL" { None } else { Some(arg.as_str()) };
+        return run_io_sched(target);
+    }
+    if cli.top_temp {
+        return run_top_temp();
+    }
+    if let Some(dev) = &cli.spindown {
+        return run_spindown(dev, cli.sleep_mode);
     }
     if cli.config {
         return run_print_config();
@@ -603,6 +629,211 @@ fn parse_since(s: &str) -> Option<chrono::Duration> {
         return Some(chrono::Duration::minutes(n.trim().parse::<i64>().ok()?));
     }
     None
+}
+
+fn read_scheduler(dev: &str) -> Option<(String, Vec<String>)> {
+    let path = format!("/sys/block/{}/queue/scheduler", dev);
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut active: Option<String> = None;
+    let mut available: Vec<String> = Vec::new();
+    for word in content.split_whitespace() {
+        if word.starts_with('[') && word.ends_with(']') {
+            let s = word.trim_matches(|c: char| c == '[' || c == ']').to_string();
+            active = Some(s.clone());
+            available.push(s);
+        } else {
+            available.push(word.to_string());
+        }
+    }
+    active.map(|a| (a, available))
+}
+
+fn run_io_sched(arg: Option<&str>) -> Result<()> {
+    // Enumerate real block devices from /sys/block (skip loop, optical, ram)
+    let skip_prefixes = ["loop", "sr", "fd", "ram", "zram"];
+    let mut all_devs: Vec<String> = std::fs::read_dir("/sys/block")?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if skip_prefixes.iter().any(|p| name.starts_with(p)) { return None; }
+            let sched = format!("/sys/block/{}/queue/scheduler", name);
+            if std::path::Path::new(&sched).exists() { Some(name) } else { None }
+        })
+        .collect();
+    all_devs.sort();
+
+    match arg {
+        None => {
+            // List all devices
+            if all_devs.is_empty() {
+                println!("No block devices with I/O scheduler control found.");
+                return Ok(());
+            }
+            println!("{:<12}  {:<18}  {}", "Device", "Active", "Available");
+            println!("{}", "─".repeat(62));
+            for dev in &all_devs {
+                if let Some((active, available)) = read_scheduler(dev) {
+                    let others: Vec<&str> = available.iter()
+                        .filter(|s| s.as_str() != active.as_str())
+                        .map(String::as_str)
+                        .collect();
+                    let avail_str = if others.is_empty() {
+                        "(only option)".to_string()
+                    } else {
+                        others.join("  ")
+                    };
+                    println!("{:<12}  {:<18}  {}", dev, active, avail_str);
+                }
+            }
+            println!("\nSet with: dtop --io-sched DEVICE=SCHEDULER");
+        }
+        Some(a) if a.contains('=') => {
+            // Set scheduler: DEVICE=SCHEDULER
+            let (dev, sched) = a.split_once('=').unwrap();
+            let dev = dev.trim_start_matches("/dev/");
+            let sched = sched.trim();
+            if sched.is_empty() {
+                eprintln!("Scheduler name cannot be empty. Use DEVICE=SCHEDULER.");
+                std::process::exit(1);
+            }
+            let sched_path = format!("/sys/block/{}/queue/scheduler", dev);
+            if !std::path::Path::new(&sched_path).exists() {
+                eprintln!("Device '{}' not found or has no scheduler control.", dev);
+                std::process::exit(1);
+            }
+            match std::fs::write(&sched_path, sched) {
+                Ok(_) => {
+                    // Re-read to confirm
+                    let confirmed = read_scheduler(dev)
+                        .map(|(a, _)| a)
+                        .unwrap_or_else(|| sched.to_string());
+                    println!("✓ /dev/{} I/O scheduler → {}", dev, confirmed);
+                }
+                Err(e) => {
+                    eprintln!("✗ Failed to set scheduler: {}", e);
+                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        eprintln!("  Hint: run as root to change I/O schedulers.");
+                    }
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some(dev) => {
+            // Show one device
+            let dev = dev.trim_start_matches("/dev/");
+            let sched_path = format!("/sys/block/{}/queue/scheduler", dev);
+            if !std::path::Path::new(&sched_path).exists() {
+                eprintln!("Device '{}' not found or has no scheduler control.", dev);
+                std::process::exit(1);
+            }
+            if let Some((active, available)) = read_scheduler(dev) {
+                println!("/dev/{}", dev);
+                println!("  Active scheduler  : {}", active);
+                println!("  Available         : {}", available.join("  "));
+                println!();
+                println!("  To change: dtop --io-sched {}=SCHEDULER", dev);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_top_temp() -> Result<()> {
+    use collectors::{lsblk, smart_cache};
+
+    let cache = smart_cache::load();
+    let devs  = lsblk::run_lsblk().unwrap_or_default();
+
+    // Pair each device with its cached temperature
+    let mut rows: Vec<(String, i32, &'static str, String)> = Vec::new();
+    for dev in &devs {
+        if let Some(smart) = cache.get(&dev.name) {
+            if let Some(temp) = smart.temperature {
+                let dtype = if dev.transport.as_deref().unwrap_or("").contains("nvme") {
+                    "NVMe"
+                } else if !dev.rotational {
+                    "SSD"
+                } else {
+                    "HDD"
+                };
+                let model = dev.model.clone().unwrap_or_else(|| "?".to_string());
+                rows.push((dev.name.clone(), temp, dtype, model));
+            }
+        }
+    }
+
+    if rows.is_empty() {
+        println!("No temperature data in SMART cache.");
+        println!("Run dtop (TUI) or dtop --daemon first to populate the cache,");
+        println!("or use dtop --device-report DEVICE for an on-demand reading.");
+        return Ok(());
+    }
+
+    rows.sort_by(|a, b| b.1.cmp(&a.1));  // hottest first
+    let max_temp = rows[0].1.max(80);     // scale bar to at least 80°C
+
+    println!("TEMPERATURE  ({} devices with SMART data)", rows.len());
+    println!("{:<10}  {:>5}  {:<5}  {:<26}  {}",
+        "Device", "Temp", "Type", "Model", "");
+    println!("{}", "─".repeat(72));
+
+    for (name, temp, dtype, model) in &rows {
+        let is_hdd = *dtype == "HDD";
+        let warn_t = if is_hdd { 50 } else { 55 };
+        let crit_t = if is_hdd { 60 } else { 70 };
+        let flag   = if *temp >= crit_t { " !!CRIT" } else if *temp >= warn_t { " !WARN" } else { "" };
+
+        let bar_filled = ((*temp as f64 / max_temp as f64) * 20.0) as usize;
+        let bar = format!("{}{}", "█".repeat(bar_filled), "░".repeat(20usize.saturating_sub(bar_filled)));
+
+        let model_short: String = model.chars().take(26).collect();
+        println!("{:<10}  {:>3}°C  {:<5}  {:<26}  {}{}",
+            name, temp, dtype, model_short, bar, flag);
+    }
+    Ok(())
+}
+
+fn run_spindown(device: &str, sleep: bool) -> Result<()> {
+    let name     = device.trim_start_matches("/dev/");
+    let dev_path = format!("/dev/{}", name);
+    let flag     = if sleep { "-Y" } else { "-y" };
+    let mode     = if sleep { "sleep (deep)" } else { "standby" };
+
+    println!("Setting /dev/{} to {} mode…", name, mode);
+    if sleep {
+        println!("  Warning: deep sleep requires a power cycle to spin the drive back up.");
+    }
+
+    let out = std::process::Command::new("hdparm")
+        .args([flag, &dev_path])
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "hdparm not found.\nInstall with:  apt install hdparm  (Debian/Ubuntu)\n\
+                     or:            yum install hdparm  (RHEL/CentOS)"
+                )
+            } else {
+                anyhow::anyhow!("Failed to run hdparm: {}", e)
+            }
+        })?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    if out.status.success() {
+        println!("✓ /dev/{} is now in {} mode.", name, mode);
+        if !stdout.trim().is_empty() { println!("{}", stdout.trim()); }
+    } else {
+        eprintln!("✗ hdparm exited {}:", out.status);
+        if !stdout.trim().is_empty() { eprintln!("{}", stdout.trim()); }
+        if !stderr.trim().is_empty() { eprintln!("{}", stderr.trim()); }
+        if stderr.contains("Permission denied") || stdout.contains("HDIO_DRIVE_CMD") {
+            eprintln!("  Hint: run as root to control drive power state.");
+        }
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn run_print_service() -> Result<()> {

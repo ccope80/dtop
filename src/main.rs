@@ -4695,7 +4695,7 @@ With CLI flags it operates as a non-interactive reporting tool.
 Quit
 .TP
 .B ?, F1
-Toggle help overlay (scrollable with \fB\(updo\fR/\fB\(downarrow\fR)
+Toggle help overlay (scrollable with up/down arrows)
 .TP
 .B t
 Cycle color theme

@@ -5,7 +5,9 @@ use crate::ui::theme::Theme;
 use crate::util::health_score::{health_score, score_style};
 use crate::util::human::{fmt_bytes, fmt_duration_short, fmt_iops, fmt_pct, fmt_rate};
 use crate::util::smart_anomaly::{self, DeviceAnomalies};
+use crate::util::smart_attr_desc;
 use crate::util::smart_baseline::Baseline;
+use crate::util::write_endurance::{DeviceEndurance, daily_avg};
 use chrono::Local;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -32,6 +34,8 @@ pub fn render_detail(
     smart_test_status: Option<&str>,
     anomalies: Option<&DeviceAnomalies>,
     baseline: Option<&Baseline>,
+    endurance: Option<&DeviceEndurance>,
+    show_desc: bool,
     theme: &Theme,
 ) {
     let win_label = WINDOWS[history_window.min(2)].1;
@@ -64,7 +68,7 @@ pub fn render_detail(
         .split(inner);
 
     render_sparklines(f, sections[0], device, history_window, theme);
-    render_info(f, sections[1], device, filesystems, scroll, smart_test_status, anomalies, baseline, theme);
+    render_info(f, sections[1], device, filesystems, scroll, smart_test_status, anomalies, baseline, endurance, show_desc, theme);
 }
 
 fn render_sparklines(f: &mut Frame, area: Rect, device: &BlockDevice, history_window: usize, theme: &Theme) {
@@ -170,7 +174,7 @@ fn lat_style(ms: f64, theme: &Theme) -> Style {
     else               { theme.crit }
 }
 
-fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[Filesystem], scroll: usize, smart_test_status: Option<&str>, anomalies: Option<&DeviceAnomalies>, baseline: Option<&Baseline>, theme: &Theme) {
+fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[Filesystem], scroll: usize, smart_test_status: Option<&str>, anomalies: Option<&DeviceAnomalies>, baseline: Option<&Baseline>, endurance: Option<&DeviceEndurance>, show_desc: bool, theme: &Theme) {
     let mut lines: Vec<Line> = Vec::new();
 
     // ── Device info ───────────────────────────────────────────────────
@@ -203,6 +207,39 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[F
     };
     lines.push(kv_colored("Health Score", &hs_str, hs_style, theme));
     lines.push(Line::from(vec![]));
+
+    // ── Write endurance (tracked session data) ────────────────────────
+    if let Some(e) = endurance {
+        let (daily, days) = daily_avg(e);
+        let total_str = fmt_bytes(e.total_bytes_written);
+        let daily_str = fmt_bytes(daily as u64);
+        let age_str   = if days < 1.0 {
+            format!("{:.1}h", days * 24.0)
+        } else {
+            format!("{:.1}d", days)
+        };
+        lines.push(section_header("── Write Endurance (tracked) ", theme));
+        lines.push(Line::from(vec![
+            Span::styled("  Total Written   ", theme.text_dim),
+            Span::styled(total_str, theme.text),
+            Span::styled(format!("  (over {})", age_str), theme.text_dim),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  Daily Avg Write ", theme.text_dim),
+            Span::styled(format!("{}/day", daily_str), theme.text),
+        ]));
+        // SMART LBA-based totals (more accurate for SSDs)
+        if let Some(smart) = &device.smart {
+            const LBA_SIZE: u64 = 512;
+            if let Some(lba_w) = smart.attributes.iter().find(|a| a.id == 241) {
+                lines.push(kv("LBAs Written (SMART)", &fmt_bytes(lba_w.raw_value * LBA_SIZE), theme));
+            }
+            if let Some(lba_r) = smart.attributes.iter().find(|a| a.id == 242) {
+                lines.push(kv("LBAs Read (SMART)", &fmt_bytes(lba_r.raw_value * LBA_SIZE), theme));
+            }
+        }
+        lines.push(Line::from(vec![]));
+    }
 
     // ── Drive endurance / lifespan estimate ───────────────────────────
     if let Some(smart) = &device.smart {
@@ -345,7 +382,12 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[F
             lines.push(kv("Data Written",     &fmt_bytes(nvme.bytes_written()), theme));
             lines.push(Line::from(vec![]));
         } else {
-            lines.push(section_header("── SMART Attributes ", theme));
+            let desc_hint = if show_desc { "D=hide desc" } else { "D=show desc" };
+            lines.push(Line::from(vec![
+                Span::styled("── SMART Attributes ", theme.text_dim),
+                Span::styled("─".repeat(28), theme.text_dim),
+                Span::styled(format!("  [{}]", desc_hint), theme.text_dim),
+            ]));
             let (health_str, health_style) = match smart.status {
                 SmartStatus::Passed  => ("PASSED", theme.ok),
                 SmartStatus::Warning => ("WARNING — pre-fail attr at risk", theme.warn),
@@ -413,6 +455,13 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[F
                     Span::styled(format!("{} ", delta_str), delta_style),
                     Span::styled(format!("{}", attr.raw_str), raw_style),
                 ]));
+                if show_desc {
+                    if let Some(desc) = smart_attr_desc::describe(attr.id) {
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("       ↳ {}", desc), theme.text_dim),
+                        ]));
+                    }
+                }
             }
 
             if smart.attributes.is_empty() {

@@ -57,6 +57,10 @@ struct Cli {
     /// Number of alert log entries to show (used with --alerts)
     #[arg(long, default_value_t = 50)]
     last: usize,
+
+    /// Print config file path and current values, then exit
+    #[arg(long)]
+    config: bool,
 }
 
 fn main() -> Result<()> {
@@ -73,6 +77,9 @@ fn main() -> Result<()> {
     }
     if cli.alerts {
         return run_alerts(cli.last);
+    }
+    if cli.config {
+        return run_print_config();
     }
     if cli.daemon {
         return run_daemon(cli.interval, !cli.no_smart);
@@ -181,6 +188,50 @@ fn run_report() -> Result<()> {
     let (devices, filesystems) = report::collect_snapshot();
     let alerts = alerts::evaluate(&devices, &filesystems, &config::Config::load().alerts.thresholds);
     print!("{}", report::generate(&devices, &filesystems, &alerts));
+    Ok(())
+}
+
+fn run_print_config() -> Result<()> {
+    let cfg = config::Config::load();
+    let path = config::Config::config_path()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let t = &cfg.alerts.thresholds;
+    println!("Config: {}", path);
+    println!("");
+    println!("[general]");
+    println!("  update_interval_ms = {}", cfg.general.update_interval_ms);
+    println!("  smart_interval_sec = {}", cfg.general.smart_interval_sec);
+    println!("");
+    println!("[alerts.thresholds]");
+    println!("  filesystem_warn_pct   = {}%", t.filesystem_warn_pct);
+    println!("  filesystem_crit_pct   = {}%", t.filesystem_crit_pct);
+    println!("  inode_warn_pct        = {}%", t.inode_warn_pct);
+    println!("  inode_crit_pct        = {}%", t.inode_crit_pct);
+    println!("  temperature_warn_ssd  = {}°C", t.temperature_warn_ssd);
+    println!("  temperature_crit_ssd  = {}°C", t.temperature_crit_ssd);
+    println!("  temperature_warn_hdd  = {}°C", t.temperature_warn_hdd);
+    println!("  temperature_crit_hdd  = {}°C", t.temperature_crit_hdd);
+    println!("  io_util_warn_pct      = {}%", t.io_util_warn_pct);
+    println!("  latency_warn_ms       = {}ms", t.latency_warn_ms);
+    println!("  latency_crit_ms       = {}ms", t.latency_crit_ms);
+    println!("  cooldown_hours        = {}", cfg.alerts.cooldown_hours);
+    println!("");
+    println!("[devices]");
+    println!("  exclude = {:?}", cfg.devices.exclude);
+    if cfg.devices.aliases.is_empty() {
+        println!("  aliases = (none)");
+    } else {
+        for (k, v) in &cfg.devices.aliases {
+            println!("  alias: {} → {}", k, v);
+        }
+    }
+    println!("");
+    println!("[notifications]");
+    let webhook = if cfg.notifications.webhook_url.is_empty() { "(not set)" } else { "(configured)" };
+    println!("  webhook_url    = {}", webhook);
+    println!("  notify_critical = {}", cfg.notifications.notify_critical);
+    println!("  notify_warning  = {}", cfg.notifications.notify_warning);
     Ok(())
 }
 

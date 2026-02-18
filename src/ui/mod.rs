@@ -1,5 +1,6 @@
 pub mod alert_log_view;
 pub mod alerts_panel;
+pub mod config_overlay;
 pub mod benchmark_popup;
 pub mod dashboard;
 pub mod detail;

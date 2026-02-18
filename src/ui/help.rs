@@ -34,6 +34,7 @@ pub fn render(f: &mut Frame, theme: &Theme) {
         key_line(theme, "  Enter / l",      "Drill-down / confirm"),
         key_line(theme, "  PageUp/Dn",      "Scroll list"),
         key_line(theme, "  t",              "Cycle color theme"),
+        key_line(theme, "  C",              "Config viewer overlay"),
         key_line(theme, "  ? / F1",         "Toggle this help"),
         Line::from(""),
         key_line(theme, "Views", ""),
@@ -54,6 +55,7 @@ pub fn render(f: &mut Frame, theme: &Theme) {
         key_line(theme, "  w",  "Cycle history window (60s / 5m / 1h)"),
         key_line(theme, "  r",  "Force SMART re-poll now"),
         key_line(theme, "  B",  "Save SMART baseline snapshot"),
+        key_line(theme, "  D",  "Toggle SMART attribute descriptions"),
         key_line(theme, "  b",  "Sequential read benchmark (256 MiB)"),
         key_line(theme, "  x",  "Schedule SMART short self-test"),
     ];

@@ -1,6 +1,6 @@
 use crate::alerts::{self, Alert};
 use crate::collectors::{diskstats, filesystem, lsblk, lvm, mdraid, nfs, process_io, smart as smart_collector, smart_cache, zfs};
-use crate::util::{alert_log, health_history, smart_anomaly, smart_baseline, webhook};
+use crate::util::{alert_log, health_history, smart_anomaly, smart_baseline, webhook, write_endurance};
 use crate::config::Config;
 use crate::ui::benchmark_popup;
 use crate::input::{handle_key, Action};
@@ -245,10 +245,19 @@ pub struct App {
     // Health score history — per-device, persisted across sessions
     pub health_history: health_history::HealthHistory,
 
+    // Cumulative write endurance tracking — per-device, persisted
+    pub write_endurance: write_endurance::EnduranceMap,
+
     // Alert log viewer state (F6)
     pub alert_log_entries: Vec<(String, crate::alerts::Alert)>,
     pub alert_log_scroll:  usize,
     pub alert_log_filter:  AlertLogFilter,
+
+    // Config overlay (C key)
+    pub show_config: bool,
+
+    // Detail view: show SMART attribute descriptions (D key)
+    pub detail_show_desc: bool,
 
     // Filesystem usage history for fill-rate computation: mount → [(Instant, used_bytes)]
     fs_usage_history: HashMap<String, VecDeque<(Instant, u64)>>,
@@ -314,9 +323,12 @@ impl App {
             acked_alerts:      HashSet::new(),
             smart_baselines:   HashMap::new(),
             health_history:    health_history::load(),
+            write_endurance:   write_endurance::load(),
             alert_log_entries: Vec::new(),
             alert_log_scroll:  0,
             alert_log_filter:  AlertLogFilter::All,
+            show_config:       false,
+            detail_show_desc:  false,
             fs_usage_history:  HashMap::new(),
             should_quit:   false,
         };
@@ -367,9 +379,10 @@ impl App {
             self.consume_smart_results();
             self.consume_bench_results();
 
-            let show_help   = self.show_help;
-            let bench_state = self.bench_state.clone();
-            let theme_snap  = self.theme.clone();
+            let show_help    = self.show_help;
+            let show_config  = self.show_config;
+            let bench_state  = self.bench_state.clone();
+            let theme_snap   = self.theme.clone();
 
             terminal.draw(|f| {
                 match self.active_view {
@@ -391,6 +404,10 @@ impl App {
                 }
                 if show_help {
                     help::render(f, &theme_snap);
+                }
+                if show_config {
+                    use crate::ui::config_overlay::render_config_overlay;
+                    render_config_overlay(f, &self.config, &theme_snap);
                 }
                 if bench_state != BenchmarkState::Idle {
                     benchmark_popup::render(f, &bench_state, &theme_snap);
@@ -501,10 +518,25 @@ impl App {
             return;
         }
 
+        if self.show_config {
+            match action {
+                Action::Quit => self.should_quit = true,
+                Action::ShowConfig | Action::Back => { self.show_config = false; }
+                _ => {}
+            }
+            return;
+        }
+
         match action {
             Action::Quit => self.should_quit = true,
 
             Action::ShowHelp => { self.show_help = true; }
+
+            Action::ShowConfig => { self.show_config = !self.show_config; }
+
+            Action::ToggleDesc => {
+                if self.detail_open { self.detail_show_desc = !self.detail_show_desc; }
+            }
 
             Action::CycleTheme => {
                 self.theme_variant = self.theme_variant.next();
@@ -972,6 +1004,14 @@ impl App {
         // NFS mounts (cheap read of /proc/self/mountstats)
         self.nfs_mounts = nfs::read_nfs_mounts();
 
+        // Accumulate write endurance per device
+        let write_updates: Vec<(String, f64)> = self.devices.iter()
+            .map(|d| (d.name.clone(), d.write_bytes_per_sec))
+            .collect();
+        for (name, bps) in write_updates {
+            write_endurance::update(&mut self.write_endurance, &name, bps, elapsed);
+        }
+
         self.prev_diskstats = now_stats;
         Ok(())
     }
@@ -1054,6 +1094,9 @@ impl App {
         self.raid_arrays = mdraid::read_mdstat();
         self.lvm_state   = lvm::read_lvm();
         self.zfs_pools   = zfs::read_zpools();
+
+        // Persist write endurance on slow tick (every 30s)
+        write_endurance::save(&self.write_endurance);
 
         Ok(())
     }

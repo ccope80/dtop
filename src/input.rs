@@ -27,6 +27,8 @@ pub enum Action {
     FilterDevices, // f: cycle device type filter (All/NVMe/SSD/HDD)
     AckAlerts,     // a: acknowledge all current alerts
     SaveBaseline,  // B: save current SMART data as baseline for selected device
+    ToggleDesc,    // D: toggle SMART attribute descriptions in detail view
+    ShowConfig,    // C: open config viewer overlay
     JumpTop,       // g: jump to first device / row
     JumpBottom,    // G: jump to last device / row
     None,
@@ -75,6 +77,8 @@ pub fn handle_key(key: KeyEvent) -> Action {
         (KeyCode::Char('f'), _) => Action::FilterDevices,
         (KeyCode::Char('a'), _) => Action::AckAlerts,
         (KeyCode::Char('B'), _) => Action::SaveBaseline,
+        (KeyCode::Char('D'), _) => Action::ToggleDesc,
+        (KeyCode::Char('C'), _) => Action::ShowConfig,
 
         // Jump to first / last
         (KeyCode::Char('g'), _) => Action::JumpTop,

@@ -5,5 +5,7 @@ pub mod human;
 pub mod report;
 pub mod ring_buffer;
 pub mod smart_anomaly;
+pub mod smart_attr_desc;
 pub mod smart_baseline;
 pub mod webhook;
+pub mod write_endurance;

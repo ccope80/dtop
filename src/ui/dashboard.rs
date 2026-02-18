@@ -121,7 +121,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 let test_status = app.smart_test_status.get(&dev.name).map(|s| s.as_str());
                 let anomalies   = app.smart_anomalies.get(&dev.name);
                 let baseline    = app.smart_baselines.get(&dev.name).map(|b| b as &_);
-                render_detail(f, cols[1], dev, &app.filesystems, app.detail_scroll, app.detail_history_window, test_status, anomalies, baseline, &theme);
+                let endurance   = app.write_endurance.get(&dev.name).map(|e| e as &_);
+                render_detail(f, cols[1], dev, &app.filesystems, app.detail_scroll, app.detail_history_window, test_status, anomalies, baseline, endurance, app.detail_show_desc, &theme);
             }
         }
     } else if area.width < 100 {

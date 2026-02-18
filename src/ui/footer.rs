@@ -32,11 +32,12 @@ pub fn render_footer(
             ("q", "Quit"), ("Tab", "Focus"), ("t", "Theme"),
         ],
         ActivePanel::Alerts => &[
-            ("q", "Quit"), ("Tab", "Focus"), ("t", "Theme"),
+            ("q", "Quit"), ("Tab", "Focus"), ("a", "Ack all"), ("t", "Theme"),
         ],
         ActivePanel::Detail => &[
             ("Esc/h", "Back"), ("↑↓/jk", "Scroll"), ("w", "Window"),
-            ("b", "Benchmark"), ("x", "SMART test"), ("t", "Theme"), ("q", "Quit"),
+            ("r", "SMART refresh"), ("b", "Benchmark"), ("x", "SMART test"),
+            ("t", "Theme"), ("q", "Quit"),
         ],
     };
 

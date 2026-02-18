@@ -38,11 +38,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
         .split(area);
 
     // ── Header line 1: title + alerts + clock ──────────────────────
+    // Count only un-acked alerts for the badge
     let crit_count = app.alerts.iter()
-        .filter(|a| a.severity == crate::alerts::Severity::Critical)
+        .filter(|a| a.severity == crate::alerts::Severity::Critical && !app.acked_alerts.contains(&a.key()))
         .count();
     let warn_count = app.alerts.iter()
-        .filter(|a| a.severity == crate::alerts::Severity::Warning)
+        .filter(|a| a.severity == crate::alerts::Severity::Warning && !app.acked_alerts.contains(&a.key()))
         .count();
 
     let alert_badge = if crit_count > 0 {
@@ -119,7 +120,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             if let Some(dev) = app.devices.get(idx) {
                 let test_status = app.smart_test_status.get(&dev.name).map(|s| s.as_str());
                 let anomalies   = app.smart_anomalies.get(&dev.name);
-                render_detail(f, cols[1], dev, app.detail_scroll, app.detail_history_window, test_status, anomalies, &theme);
+                render_detail(f, cols[1], dev, &app.filesystems, app.detail_scroll, app.detail_history_window, test_status, anomalies, &theme);
             }
         }
     } else if area.width < 100 {
@@ -180,7 +181,7 @@ fn render_preset_full(f: &mut Frame, body: ratatui::layout::Rect, app: &mut App,
         app.active_panel == ActivePanel::SmartTemp, theme,
     );
     render_alerts_panel(
-        f, bottom[1], &app.alerts, &app.alert_history,
+        f, bottom[1], &app.alerts, &app.alert_history, &app.acked_alerts,
         app.active_panel == ActivePanel::Alerts, theme,
     );
 }

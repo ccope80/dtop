@@ -218,6 +218,9 @@ pub struct App {
     // Alert cooldown — maps alert key → Unix timestamp of last fire (in-memory)
     alert_fired_at: HashMap<String, i64>,
 
+    // Alert acknowledgment — keys of alerts the operator has seen this session
+    pub acked_alerts: HashSet<String>,
+
     // Filesystem usage history for fill-rate computation: mount → [(Instant, used_bytes)]
     fs_usage_history: HashMap<String, VecDeque<(Instant, u64)>>,
 
@@ -279,6 +282,7 @@ impl App {
             smart_test_status: HashMap::new(),
             smart_anomalies:   smart_anomaly::load(),
             alert_fired_at:    HashMap::new(),
+            acked_alerts:      HashSet::new(),
             fs_usage_history:  HashMap::new(),
             should_quit:   false,
         };
@@ -390,11 +394,13 @@ impl App {
         let cooldown_secs = self.config.alerts.cooldown_hours as i64 * 3600;
         let mut fresh: Vec<Alert> = Vec::new();
 
+        // Clear acks for conditions that have resolved — so re-fires are un-acked
+        let current_keys: HashSet<String> = new.iter().map(|a| a.key()).collect();
+        self.acked_alerts.retain(|k| current_keys.contains(k));
+
         for alert in new {
-            let key = format!("{}{}{}", alert.severity.label(), alert.prefix(), alert.message);
-            let was_present = prev.iter().any(|a| {
-                format!("{}{}{}", a.severity.label(), a.prefix(), a.message) == key
-            });
+            let key = alert.key();
+            let was_present = prev.iter().any(|a| a.key() == key);
             if !was_present {
                 // Cooldown check: suppress re-firing if within cooldown window
                 if cooldown_secs > 0 {
@@ -548,7 +554,18 @@ impl App {
                 }
             }
 
-            Action::SmartRefresh => {}
+            Action::SmartRefresh => {
+                // Manually trigger SMART re-poll for the selected device (detail view)
+                if self.detail_open && self.smart_enabled {
+                    if let Some(idx) = self.device_list_state.selected() {
+                        if let Some(dev) = self.devices.get(idx) {
+                            let name = dev.name.clone();
+                            self.smart_pending.remove(&name);
+                            self.schedule_smart(&name);
+                        }
+                    }
+                }
+            }
 
             Action::Benchmark => {
                 // Dismiss if already showing a result; start if in detail and idle
@@ -571,6 +588,13 @@ impl App {
                     // Re-select first visible device after filter change
                     let first = self.filtered_device_indices().into_iter().next();
                     self.device_list_state.select(first);
+                }
+            }
+
+            Action::AckAlerts => {
+                // Acknowledge all current alerts — dims them in the panel and clears the badge
+                for a in &self.alerts {
+                    self.acked_alerts.insert(a.key());
                 }
             }
 

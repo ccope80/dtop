@@ -34,6 +34,11 @@ impl Alert {
         else if let Some(m) = &self.mount  { format!("[{}] ", m) }
         else { String::new() }
     }
+
+    /// Stable string key identifying this alert condition (for ack/cooldown).
+    pub fn key(&self) -> String {
+        format!("{}{}{}", self.severity.label(), self.prefix(), self.message)
+    }
 }
 
 /// Evaluate all alert conditions against current state.

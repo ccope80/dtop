@@ -24,6 +24,7 @@ pub enum Action {
     Benchmark,     // b: run quick read benchmark on selected device
     SmartTest,     // x: schedule SMART short self-test on selected device
     FilterDevices, // f: cycle device type filter (All/NVMe/SSD/HDD)
+    AckAlerts,     // a: acknowledge all current alerts
     JumpTop,       // g: jump to first device / row
     JumpBottom,    // G: jump to last device / row
     None,
@@ -67,7 +68,9 @@ pub fn handle_key(key: KeyEvent) -> Action {
         // Device actions (detail view)
         (KeyCode::Char('b'), _) => Action::Benchmark,
         (KeyCode::Char('x'), _) => Action::SmartTest,
+        (KeyCode::Char('r'), _) => Action::SmartRefresh,
         (KeyCode::Char('f'), _) => Action::FilterDevices,
+        (KeyCode::Char('a'), _) => Action::AckAlerts,
 
         // Jump to first / last
         (KeyCode::Char('g'), _) => Action::JumpTop,

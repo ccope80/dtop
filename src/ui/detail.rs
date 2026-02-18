@@ -1,4 +1,5 @@
 use crate::models::device::BlockDevice;
+use crate::models::filesystem::Filesystem;
 use crate::models::smart::{SmartData, SmartStatus};
 use crate::ui::theme::Theme;
 use crate::util::health_score::{health_score, score_style};
@@ -23,6 +24,7 @@ pub fn render_detail(
     f: &mut Frame,
     area: Rect,
     device: &BlockDevice,
+    filesystems: &[Filesystem],
     scroll: usize,
     history_window: usize,
     smart_test_status: Option<&str>,
@@ -59,7 +61,7 @@ pub fn render_detail(
         .split(inner);
 
     render_sparklines(f, sections[0], device, history_window, theme);
-    render_info(f, sections[1], device, scroll, smart_test_status, anomalies, theme);
+    render_info(f, sections[1], device, filesystems, scroll, smart_test_status, anomalies, theme);
 }
 
 fn render_sparklines(f: &mut Frame, area: Rect, device: &BlockDevice, history_window: usize, theme: &Theme) {
@@ -165,7 +167,7 @@ fn lat_style(ms: f64, theme: &Theme) -> Style {
     else               { theme.crit }
 }
 
-fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, smart_test_status: Option<&str>, anomalies: Option<&DeviceAnomalies>, theme: &Theme) {
+fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[Filesystem], scroll: usize, smart_test_status: Option<&str>, anomalies: Option<&DeviceAnomalies>, theme: &Theme) {
     let mut lines: Vec<Line> = Vec::new();
 
     // ── Device info ───────────────────────────────────────────────────
@@ -198,23 +200,6 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, s
     };
     lines.push(kv_colored("Health Score", &hs_str, hs_style, theme));
     lines.push(Line::from(vec![]));
-
-    // ── Partitions ────────────────────────────────────────────────────
-    if !device.partitions.is_empty() {
-        lines.push(section_header("── Partitions ", theme));
-        for p in &device.partitions {
-            let size_str = fmt_bytes(p.size);
-            let fs_str   = p.fs_type.as_deref().unwrap_or("—");
-            let mp_str   = p.mountpoint.as_deref().unwrap_or("—");
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {:<14}", p.name), theme.text),
-                Span::styled(format!("{:>9}  ", size_str), theme.text_dim),
-                Span::styled(format!("{:<8}  ", fs_str), theme.text_dim),
-                Span::styled(mp_str.to_string(), theme.ok),
-            ]));
-        }
-        lines.push(Line::from(vec![]));
-    }
 
     // ── Drive endurance / lifespan estimate ───────────────────────────
     if let Some(smart) = &device.smart {
@@ -303,16 +288,16 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, s
             }
             lines.push(Line::from(vec![]));
 
-            // Column headers — added Δ column
+            // Column headers
             lines.push(Line::from(vec![
                 Span::styled(
-                    "  ID   Name                       Type     Val  Wst  Thr  Δ  Raw",
+                    "  ID   Name                       Type     Val  Wst  Thr  Mgn  Δ  Raw",
                     theme.text_dim,
                 ),
             ]));
             lines.push(Line::from(vec![
                 Span::styled(
-                    "  ──   ────────────────────────── ──────── ───  ───  ───  ─  ─────────",
+                    "  ──   ────────────────────────── ──────── ───  ───  ───  ───  ─  ─────────",
                     theme.text_dim,
                 ),
             ]));
@@ -326,6 +311,18 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, s
                     row_style
                 };
 
+                // Margin = normalized value - threshold (how far from failure)
+                let (mgn_str, mgn_style) = if attr.thresh == 0 {
+                    ("  — ".to_string(), theme.text_dim)
+                } else {
+                    let m = attr.value as i32 - attr.thresh as i32;
+                    let style = if m <= 0        { theme.crit }
+                                else if m <= 5   { theme.crit }
+                                else if m <= 20  { theme.warn }
+                                else             { theme.ok };
+                    (format!("{:>4}", m), style)
+                };
+
                 // Delta vs previous poll
                 let (delta_str, delta_style) = delta_arrow(attr.id, attr.value, device.smart_prev.as_ref(), theme);
 
@@ -336,6 +333,7 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, s
                     Span::styled(format!("{:>3}  ", attr.value), row_style),
                     Span::styled(format!("{:>3}  ", attr.worst), theme.text_dim),
                     Span::styled(format!("{:>3}  ", attr.thresh), theme.text_dim),
+                    Span::styled(format!("{}  ", mgn_str), mgn_style),
                     Span::styled(format!("{} ", delta_str), delta_style),
                     Span::styled(format!("{}", attr.raw_str), raw_style),
                 ]));
@@ -388,14 +386,30 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, s
             let tree     = if is_last { "└─" } else { "├─" };
             let fs       = part.fs_type.as_deref().unwrap_or("?");
             let mnt      = part.mountpoint.as_deref().unwrap_or("");
-            lines.push(Line::from(vec![
+
+            // Cross-reference with live filesystem usage
+            let live_fs = part.mountpoint.as_deref()
+                .and_then(|mp| filesystems.iter().find(|f| f.mount == mp));
+
+            let mut spans = vec![
                 Span::styled(format!("  {} ", tree), theme.text_dim),
                 Span::styled(format!("{:<12}", part.name), theme.text),
                 Span::styled(format!("{:<8}", fs), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{:>10}  ", fmt_bytes(part.size)), theme.text_dim),
                 Span::styled(mnt.to_string(), theme.text),
-            ]));
+            ];
+            if let Some(live) = live_fs {
+                let pct   = live.use_pct();
+                let style = theme.util_style(pct);
+                spans.push(Span::styled(
+                    format!("  {}/{} ({:.0}%)",
+                        fmt_bytes(live.used_bytes), fmt_bytes(live.total_bytes), pct),
+                    style,
+                ));
+            }
+            lines.push(Line::from(spans));
         }
+        lines.push(Line::from(vec![]));
     }
 
     let para = Paragraph::new(lines)

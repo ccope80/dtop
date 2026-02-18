@@ -6,21 +6,24 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 pub fn render_alerts_panel(
     f: &mut Frame,
     area: Rect,
     alerts: &[Alert],
     history: &VecDeque<(String, Alert)>,
+    acked: &HashSet<String>,
     focused: bool,
     theme: &Theme,
 ) {
     let border_style = if focused { theme.border_focused } else { theme.border };
 
-    let alert_count = alerts.len();
-    let title = if alert_count > 0 {
-        format!("5 Alerts  ({} active)", alert_count)
+    let unacked = alerts.iter().filter(|a| !acked.contains(&a.key())).count();
+    let title = if unacked > 0 {
+        format!("5 Alerts  ({} active)", unacked)
+    } else if !alerts.is_empty() {
+        format!("5 Alerts  ({} acked)", alerts.len())
     } else {
         "5 Alerts".to_string()
     };
@@ -28,7 +31,7 @@ pub fn render_alerts_panel(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(Span::styled(title, if alert_count > 0 { theme.crit } else { theme.title }));
+        .title(Span::styled(title, if unacked > 0 { theme.crit } else { theme.title }));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -46,17 +49,20 @@ pub fn render_alerts_panel(
         ]));
     } else {
         for alert in alerts.iter().take(avail.saturating_sub(1)) {
+            let is_acked = acked.contains(&alert.key());
             let (badge, badge_style) = match alert.severity {
-                Severity::Critical => ("CRIT", theme.crit),
-                Severity::Warning  => ("WARN", theme.warn),
+                Severity::Critical => ("CRIT", if is_acked { theme.text_dim } else { theme.crit }),
+                Severity::Warning  => ("WARN", if is_acked { theme.text_dim } else { theme.warn }),
                 Severity::Info     => ("INFO", theme.text_dim),
             };
+            let msg_style = if is_acked { theme.text_dim } else { theme.text };
+            let ack_mark  = if is_acked { " [ack]" } else { "" };
             lines.push(Line::from(vec![
                 Span::styled("  ", theme.text),
                 Span::styled(badge, badge_style),
                 Span::styled("  ", theme.text),
                 Span::styled(alert.prefix(), theme.text_dim),
-                Span::styled(alert.message.clone(), theme.text),
+                Span::styled(format!("{}{}", alert.message, ack_mark), msg_style),
             ]));
         }
 

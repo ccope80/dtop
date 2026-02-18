@@ -81,6 +81,7 @@ pub fn render(f: &mut Frame, theme: &Theme) {
         key_line(theme, "  --summary",     "One-line status (exit 0/1/2)"),
         key_line(theme, "  --watch N",     "Rolling status every N seconds"),
         key_line(theme, "  --report",      "Human-readable health report"),
+        key_line(theme, "  --report-html", "Self-contained HTML report"),
         key_line(theme, "  --json",        "JSON snapshot and exit"),
         key_line(theme, "  --csv",         "Device snapshot as CSV"),
         key_line(theme, "  --diff A B",    "Compare two --json snapshots"),

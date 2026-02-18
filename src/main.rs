@@ -85,6 +85,14 @@ struct Cli {
     /// Open config file in $EDITOR (creates default if missing)
     #[arg(long)]
     edit_config: bool,
+
+    /// Generate a self-contained HTML health report and exit
+    #[arg(long)]
+    report_html: bool,
+
+    /// Output file path for --report-html (default: dtop-report-TIMESTAMP.html)
+    #[arg(long, value_name = "FILE")]
+    output: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -95,6 +103,9 @@ fn main() -> Result<()> {
     }
     if cli.report {
         return run_report();
+    }
+    if cli.report_html {
+        return run_report_html(cli.output.as_deref());
     }
     if cli.check {
         return run_check(!cli.no_smart);
@@ -141,7 +152,7 @@ fn main() -> Result<()> {
 }
 
 fn run_json_snapshot() -> Result<()> {
-    use collectors::{filesystem, lsblk, nfs, smart_cache};
+    use collectors::{filesystem, lsblk, mdraid, nfs, smart_cache, zfs};
     use serde_json::{json, Value};
     use util::human::fmt_bytes;
 
@@ -169,10 +180,20 @@ fn run_json_snapshot() -> Result<()> {
                 })).collect::<Vec<_>>(),
             })
         });
+        let dev_type = if dev.transport.as_deref().unwrap_or("").contains("nvme") {
+            "NVMe"
+        } else if !dev.rotational {
+            "SSD"
+        } else if dev.rotational {
+            "HDD"
+        } else {
+            "Unknown"
+        };
         json!({
             "name":        dev.name,
             "model":       dev.model,
             "serial":      dev.serial,
+            "dev_type":    dev_type,
             "capacity":    dev.size,
             "capacity_hr": fmt_bytes(dev.size),
             "rotational":  dev.rotational,
@@ -213,12 +234,62 @@ fn run_json_snapshot() -> Result<()> {
         })
     }).collect();
 
+    // RAID arrays
+    let raids = mdraid::read_mdstat();
+    let raids_out: Vec<Value> = raids.iter().map(|arr| json!({
+        "name":           arr.name,
+        "state":          arr.state,
+        "level":          arr.level,
+        "members":        arr.members,
+        "capacity":       arr.capacity_bytes,
+        "capacity_hr":    fmt_bytes(arr.capacity_bytes),
+        "degraded":       arr.degraded,
+        "rebuild_pct":    arr.rebuild_pct,
+        "bitmap":         arr.bitmap,
+    })).collect();
+
+    // ZFS pools
+    let pools = zfs::read_zpools();
+    let pools_out: Vec<Value> = pools.iter().map(|pool| json!({
+        "name":        pool.name,
+        "health":      pool.health,
+        "size":        pool.size_bytes,
+        "size_hr":     fmt_bytes(pool.size_bytes),
+        "alloc":       pool.alloc_bytes,
+        "alloc_hr":    fmt_bytes(pool.alloc_bytes),
+        "free":        pool.free_bytes,
+        "free_hr":     fmt_bytes(pool.free_bytes),
+        "use_pct":     pool.use_pct(),
+        "scrub_status":pool.scrub_status,
+    })).collect();
+
+    // PSI (best-effort)
+    let psi_out = collectors::pressure::read_pressure().map(|p| json!({
+        "io": {
+            "some_avg10":  p.io.some.avg10,
+            "some_avg60":  p.io.some.avg60,
+            "some_avg300": p.io.some.avg300,
+            "full_avg10":  p.io.full.avg10,
+            "full_avg60":  p.io.full.avg60,
+            "full_avg300": p.io.full.avg300,
+        },
+        "cpu": {
+            "some_avg10":  p.cpu.some.avg10,
+        },
+        "mem": {
+            "some_avg10":  p.mem.some.avg10,
+        },
+    }));
+
     let snapshot = json!({
         "dtop_version": "0.1",
-        "timestamp": chrono::Local::now().to_rfc3339(),
-        "devices":     devices,
-        "filesystems": filesystems,
-        "nfs_mounts":  nfs_out,
+        "timestamp":    chrono::Local::now().to_rfc3339(),
+        "devices":      devices,
+        "filesystems":  filesystems,
+        "nfs_mounts":   nfs_out,
+        "raid_arrays":  raids_out,
+        "zfs_pools":    pools_out,
+        "psi":          psi_out,
     });
 
     println!("{}", serde_json::to_string_pretty(&snapshot)?);
@@ -234,7 +305,34 @@ fn run_report() -> Result<()> {
     let mut all_alerts = alerts::evaluate(&devices, &filesystems, &cfg.alerts);
     all_alerts.extend(alerts::evaluate_volumes(&raids, &pools));
     all_alerts.sort_by(|a, b| b.severity.cmp(&a.severity));
-    print!("{}", report::generate(&devices, &filesystems, &all_alerts));
+    print!("{}", report::generate(&devices, &filesystems, &all_alerts, &raids, &pools));
+    Ok(())
+}
+
+fn run_report_html(output: Option<&str>) -> Result<()> {
+    use util::report;
+    let cfg = config::Config::load();
+    let (devices, filesystems) = report::collect_snapshot();
+    let raids = collectors::mdraid::read_mdstat();
+    let pools = collectors::zfs::read_zpools();
+    let mut all_alerts = alerts::evaluate(&devices, &filesystems, &cfg.alerts);
+    all_alerts.extend(alerts::evaluate_volumes(&raids, &pools));
+    all_alerts.sort_by(|a, b| b.severity.cmp(&a.severity));
+    let html = report::generate_html(&devices, &filesystems, &all_alerts, &raids, &pools);
+
+    match output {
+        Some(path) => {
+            std::fs::write(path, &html)?;
+            println!("Report written to: {}", path);
+        }
+        None => {
+            // Auto-name: dtop-report-YYYYMMDD-HHmmss.html in current dir
+            let ts   = chrono::Local::now().format("%Y%m%d-%H%M%S");
+            let path = format!("dtop-report-{}.html", ts);
+            std::fs::write(&path, &html)?;
+            println!("Report written to: {}", path);
+        }
+    }
     Ok(())
 }
 

@@ -224,6 +224,7 @@ fn render_preset_full(f: &mut Frame, body: ratatui::layout::Rect, app: &mut App,
     render_alerts_panel(
         f, bottom[1], &app.alerts, &app.alert_history, &app.acked_alerts,
         app.active_panel == ActivePanel::Alerts, theme,
+        &mut app.alerts_panel_state,
     );
 }
 

@@ -244,6 +244,9 @@ pub struct App {
     // Alert acknowledgment — keys of alerts the operator has seen this session
     pub acked_alerts: HashSet<String>,
 
+    // Per-alert selection in the alerts panel
+    pub alerts_panel_state: ListState,
+
     // SMART baselines — per-device saved reference points (B key in detail)
     pub smart_baselines: HashMap<String, smart_baseline::Baseline>,
 
@@ -351,6 +354,7 @@ impl App {
             smart_anomalies:   smart_anomaly::load(),
             alert_fired_at:    HashMap::new(),
             acked_alerts:      ack_store::load(),
+            alerts_panel_state: ListState::default(),
             smart_baselines:   HashMap::new(),
             health_history:    health_history::load(),
             write_endurance:   write_endurance::load(),
@@ -694,6 +698,15 @@ impl App {
             Action::SelectDown => self.select_delta(1),
 
             Action::Confirm => {
+                if self.active_panel == ActivePanel::Alerts {
+                    if let Some(idx) = self.alerts_panel_state.selected() {
+                        if let Some(alert) = self.alerts.get(idx) {
+                            self.acked_alerts.insert(alert.key());
+                            ack_store::save(&self.acked_alerts);
+                        }
+                    }
+                    return;
+                }
                 if self.active_view == ActiveView::Dashboard
                     && self.active_panel == ActivePanel::Devices
                     && !self.detail_open
@@ -1006,6 +1019,9 @@ impl App {
         let cur  = panels.iter().position(|p| p == &self.active_panel).unwrap_or(0);
         let next = ((cur as i32 + dir).rem_euclid(panels.len() as i32)) as usize;
         self.active_panel = panels[next].clone();
+        if self.active_panel == ActivePanel::Alerts && !self.alerts.is_empty() {
+            self.alerts_panel_state.select(Some(0));
+        }
     }
 
     fn select_delta(&mut self, delta: i32) {
@@ -1016,6 +1032,16 @@ impl App {
             } else {
                 let max = self.nfs_mounts.len().saturating_sub(1);
                 if cur < max { self.nfs_table_state.select(Some(cur + 1)); }
+            }
+            return;
+        }
+        if self.active_panel == ActivePanel::Alerts {
+            let cur = self.alerts_panel_state.selected().unwrap_or(0);
+            if delta < 0 {
+                if cur > 0 { self.alerts_panel_state.select(Some(cur - 1)); }
+            } else {
+                let max = self.alerts.len().saturating_sub(1);
+                if cur < max { self.alerts_panel_state.select(Some(cur + 1)); }
             }
             return;
         }

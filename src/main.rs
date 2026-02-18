@@ -301,6 +301,14 @@ struct Cli {
     /// Report write barrier / FUA status for DEVICE (or all devices)
     #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
     write_barrier: Option<String>,
+
+    /// Report pending, reallocated, and uncorrectable sector counts from SMART cache
+    #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
+    sector_errors: Option<String>,
+
+    /// Show I/O queue depth settings for all devices (or one DEVICE)
+    #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
+    queue_depth: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -459,6 +467,14 @@ fn main() -> Result<()> {
     if let Some(dev_or_all) = &cli.write_barrier {
         let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
         return run_write_barrier(dev);
+    }
+    if let Some(dev_or_all) = &cli.sector_errors {
+        let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
+        return run_sector_errors(dev);
+    }
+    if let Some(dev_or_all) = &cli.queue_depth {
+        let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
+        return run_queue_depth(dev);
     }
     if cli.config {
         return run_print_config();
@@ -4172,6 +4188,147 @@ fn run_write_barrier(device: Option<&str>) -> Result<()> {
                  if fua { "yes" } else { "no" },
                  if nobarrier { "yes" } else { "no" },
                  note);
+    }
+    Ok(())
+}
+
+fn run_sector_errors(device: Option<&str>) -> Result<()> {
+    use crate::collectors::smart_cache;
+
+    let cache = smart_cache::load();
+    if cache.is_empty() {
+        println!("No SMART cache found. Run dtop TUI first to populate it.");
+        return Ok(());
+    }
+
+    let mut names: Vec<&String> = cache.keys().collect();
+    names.sort();
+    if let Some(d) = device {
+        let d = d.trim_start_matches("/dev/");
+        names.retain(|n| n.as_str() == d);
+        if names.is_empty() {
+            anyhow::bail!("Device '{}' not found in SMART cache.", d);
+        }
+    }
+
+    // SMART attribute IDs for sector health
+    // 5   = Reallocated_Sector_Ct
+    // 187 = Reported_Uncorrect
+    // 196 = Reallocated_Event_Count
+    // 197 = Current_Pending_Sector
+    // 198 = Offline_Uncorrectable
+    let sector_ids: &[u32] = &[5, 187, 196, 197, 198];
+    let _ = sector_ids; // documented reference
+
+    println!("{:<10}  {:>12}  {:>12}  {:>12}  {:>12}  {:>12}  Status",
+             "Device", "Reallocated", "Realloc Evt", "Pending", "Uncorrect", "Offline Unc");
+    println!("{}", "─".repeat(90));
+
+    let mut any_bad = false;
+    for name in &names {
+        let data = match cache.get(*name) { Some(d) => d, None => continue };
+
+        // For NVMe: use media_errors / error_log_entries
+        if let Some(nvme) = &data.nvme {
+            let status = if nvme.media_errors > 0 || nvme.critical_warning > 0 { "⚠ WARN" } else { "ok" };
+            if nvme.media_errors > 0 { any_bad = true; }
+            println!("{:<10}  {:>12}  {:>12}  {:>12}  {:>12}  {:>12}  {}",
+                     name, "NVMe", "—", "—",
+                     nvme.media_errors, nvme.error_log_entries, status);
+            continue;
+        }
+
+        let get_raw = |id: u32| -> u64 {
+            data.attributes.iter()
+                .find(|a| a.id == id)
+                .map(|a| a.raw_value)
+                .unwrap_or(0)
+        };
+
+        let reallocated   = get_raw(5);
+        let realloc_evt   = get_raw(196);
+        let pending       = get_raw(197);
+        let uncorrect     = get_raw(187);
+        let offline_unc   = get_raw(198);
+
+        let is_bad = reallocated > 0 || pending > 0 || uncorrect > 0 || offline_unc > 0;
+        if is_bad { any_bad = true; }
+        let status = if pending > 0 || uncorrect > 0 || offline_unc > 0 { "⚠ WARN" }
+                     else if reallocated > 0 { "note" }
+                     else { "ok" };
+
+        println!("{:<10}  {:>12}  {:>12}  {:>12}  {:>12}  {:>12}  {}",
+                 name, reallocated, realloc_evt, pending, uncorrect, offline_unc, status);
+    }
+
+    println!();
+    if any_bad {
+        println!("  ⚠  One or more devices have non-zero sector error counts.");
+        println!("     Run 'dtop --device-report DEV' for full SMART details.");
+    } else {
+        println!("  All devices have zero sector error counts.");
+    }
+    Ok(())
+}
+
+fn run_queue_depth(device: Option<&str>) -> Result<()> {
+    let mut devs: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/sys/block") {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("zram") { continue; }
+            if name.chars().last().map_or(false, |c| c.is_ascii_digit()) { continue; }
+            if let Some(d) = device {
+                if name != d.trim_start_matches("/dev/") { continue; }
+            }
+            devs.push(name);
+        }
+    }
+    devs.sort();
+
+    if devs.is_empty() {
+        println!("No matching block devices found.");
+        return Ok(());
+    }
+
+    println!("{:<12}  {:>10}  {:>10}  {:>12}  {:>10}  Scheduler",
+             "Device", "Queue Depth", "Max Sectors", "Nr Requests", "Rotational");
+    println!("{}", "─".repeat(74));
+
+    for dev in &devs {
+        let sysfs = format!("/sys/block/{}/queue", dev);
+        let read = |f: &str| -> String {
+            std::fs::read_to_string(format!("{}/{}", sysfs, f))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "?".to_string())
+        };
+
+        let depth       = read("nr_requests");
+        let max_sectors = read("max_sectors_kb");
+        let nr_requests = read("nr_requests");
+        let rotational  = read("rotational");
+        let rot_str     = match rotational.as_str() { "0" => "SSD/NVMe", "1" => "HDD", _ => "?" };
+
+        // Hardware queue depth from device/queue_depth if available
+        let hw_depth = std::fs::read_to_string(
+            format!("/sys/block/{}/device/queue_depth", dev))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "—".to_string());
+
+        // Current scheduler
+        let sched_raw = read("scheduler");
+        let scheduler = sched_raw.split_whitespace()
+            .find(|s| s.starts_with('[') && s.ends_with(']'))
+            .map(|s| s.trim_matches(|c| c == '[' || c == ']').to_string())
+            .unwrap_or_else(|| sched_raw.split_whitespace().next().unwrap_or("?").to_string());
+
+        println!("{:<12}  {:>10}  {:>10}  {:>12}  {:>10}  {}",
+                 dev,
+                 if hw_depth != "—" { format!("{} (hw:{})", depth, hw_depth) } else { depth },
+                 format!("{}K", max_sectors),
+                 nr_requests,
+                 rot_str,
+                 scheduler);
     }
     Ok(())
 }

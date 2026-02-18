@@ -109,6 +109,18 @@ struct Cli {
     /// Print a detailed per-device SMART report and exit
     #[arg(long, value_name = "DEVICE")]
     device_report: Option<String>,
+
+    /// Print all tracked SMART anomalies (from persisted log) and exit
+    #[arg(long)]
+    anomalies: bool,
+
+    /// Print per-device write endurance summary and exit
+    #[arg(long)]
+    endurance: bool,
+
+    /// List all saved SMART baselines and exit
+    #[arg(long)]
+    baselines: bool,
 }
 
 fn main() -> Result<()> {
@@ -134,6 +146,15 @@ fn main() -> Result<()> {
     }
     if let Some(dev) = &cli.device_report {
         return run_device_report(dev);
+    }
+    if cli.anomalies {
+        return run_anomalies();
+    }
+    if cli.endurance {
+        return run_endurance();
+    }
+    if cli.baselines {
+        return run_baselines();
     }
     if cli.config {
         return run_print_config();
@@ -303,15 +324,78 @@ fn run_json_snapshot() -> Result<()> {
         },
     }));
 
+    // SMART anomalies
+    let anomaly_log = util::smart_anomaly::load();
+    let anomalies_out: serde_json::Map<String, Value> = anomaly_log.iter().map(|(dev, dev_log)| {
+        let records: Vec<Value> = dev_log.values().map(|r| json!({
+            "attr_id":     r.attr_id,
+            "attr_name":   r.attr_name,
+            "first_seen":  util::smart_anomaly::fmt_ts(r.first_seen),
+            "first_value": r.first_value,
+            "last_value":  r.last_value,
+            "change":      r.last_value as i64 - r.first_value as i64,
+        })).collect();
+        (dev.clone(), Value::Array(records))
+    }).collect();
+
+    // Write endurance
+    let endurance_map = util::write_endurance::load();
+    let endurance_out: Vec<Value> = {
+        let mut rows: Vec<(&String, &util::write_endurance::DeviceEndurance)> = endurance_map.iter().collect();
+        rows.sort_by(|a, b| a.0.cmp(b.0));
+        rows.iter().map(|(dev, e)| {
+            let (daily, days) = util::write_endurance::daily_avg(e);
+            json!({
+                "device":               dev,
+                "total_bytes_written":  e.total_bytes_written,
+                "total_written_hr":     fmt_bytes(e.total_bytes_written),
+                "daily_avg_bytes":      daily as u64,
+                "daily_avg_hr":         fmt_bytes(daily as u64),
+                "days_tracked":         days,
+                "first_tracked_at":     e.first_tracked_at,
+            })
+        }).collect()
+    };
+
+    // Saved baselines
+    let baselines_out: Vec<Value> = {
+        let base_dir = dirs::data_local_dir().map(|p| p.join("dtop").join("baselines"));
+        let mut bls: Vec<Value> = Vec::new();
+        if let Some(dir) = base_dir {
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for entry in rd.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            if let Some(bl) = util::smart_baseline::load(stem) {
+                                bls.push(json!({
+                                    "device":         bl.device,
+                                    "saved_date":     bl.saved_date,
+                                    "power_on_hours": bl.power_on_hours,
+                                    "attribute_count":bl.attributes.len(),
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        bls.sort_by(|a, b| a["device"].as_str().cmp(&b["device"].as_str()));
+        bls
+    };
+
     let snapshot = json!({
-        "dtop_version": "0.1",
-        "timestamp":    chrono::Local::now().to_rfc3339(),
-        "devices":      devices,
-        "filesystems":  filesystems,
-        "nfs_mounts":   nfs_out,
-        "raid_arrays":  raids_out,
-        "zfs_pools":    pools_out,
-        "psi":          psi_out,
+        "dtop_version":   "0.1",
+        "timestamp":      chrono::Local::now().to_rfc3339(),
+        "devices":        devices,
+        "filesystems":    filesystems,
+        "nfs_mounts":     nfs_out,
+        "raid_arrays":    raids_out,
+        "zfs_pools":      pools_out,
+        "psi":            psi_out,
+        "anomalies":      anomalies_out,
+        "write_endurance":endurance_out,
+        "baselines":      baselines_out,
     });
 
     println!("{}", serde_json::to_string_pretty(&snapshot)?);
@@ -471,6 +555,138 @@ fn parse_since(s: &str) -> Option<chrono::Duration> {
         return Some(chrono::Duration::minutes(n.trim().parse::<i64>().ok()?));
     }
     None
+}
+
+fn run_anomalies() -> Result<()> {
+    use util::smart_anomaly;
+
+    let log = smart_anomaly::load();
+    if log.is_empty() {
+        println!("No SMART anomalies tracked yet (anomalies are detected while dtop is running).");
+        return Ok(());
+    }
+
+    // Flatten and sort: device asc, then attr_id asc
+    let mut rows: Vec<(String, &smart_anomaly::AnomalyRecord)> = log
+        .iter()
+        .flat_map(|(dev, dev_log)| dev_log.values().map(move |r| (dev.clone(), r)))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.attr_id.cmp(&b.1.attr_id)));
+
+    let total = rows.len();
+    let devs  = log.len();
+    println!("SMART ANOMALY LOG  ({} device{}, {} anomal{})",
+        devs, if devs == 1 { "" } else { "s" },
+        total, if total == 1 { "y" } else { "ies" });
+    println!("{}", "─".repeat(74));
+    println!("{:<10}  {:>4}  {:<30}  {:>10}  {:>8}  {:>8}  {:>7}",
+        "Device", "ID", "Attribute", "First Seen", "First", "Current", "Change");
+    println!("{}", "─".repeat(74));
+
+    for (dev, rec) in &rows {
+        let first_date = smart_anomaly::fmt_ts(rec.first_seen);
+        let change     = rec.last_value as i64 - rec.first_value as i64;
+        let change_str = if change == 0 {
+            "     0".to_string()
+        } else {
+            format!("  {:+}", change)
+        };
+        let attr_label = if rec.attr_id == 9999 {
+            rec.attr_name.clone()
+        } else {
+            format!("{} ({})", rec.attr_id, rec.attr_name)
+        };
+        println!("{:<10}  {:>4}  {:<30}  {:>10}  {:>8}  {:>8}  {}",
+            dev, rec.attr_id, &attr_label[..attr_label.len().min(30)],
+            first_date, rec.first_value, rec.last_value, change_str);
+    }
+    Ok(())
+}
+
+fn run_endurance() -> Result<()> {
+    use util::{write_endurance, human::fmt_bytes};
+
+    let map = write_endurance::load();
+    if map.is_empty() {
+        println!("No write endurance data yet (dtop accumulates this while running).");
+        return Ok(());
+    }
+
+    let mut rows: Vec<(&String, &write_endurance::DeviceEndurance)> = map.iter().collect();
+    rows.sort_by(|a, b| a.0.cmp(b.0));
+
+    println!("WRITE ENDURANCE  ({} device{})", rows.len(), if rows.len() == 1 { "" } else { "s" });
+    println!("{}", "─".repeat(70));
+    println!("{:<10}  {:>14}  {:>12}  {:>12}  {:>10}",
+        "Device", "Total Written", "Daily Avg", "Days Tracked", "Since");
+    println!("{}", "─".repeat(70));
+
+    for (dev, e) in &rows {
+        let (daily, days) = write_endurance::daily_avg(e);
+        let started = {
+            use chrono::{Local, TimeZone};
+            Local.timestamp_opt(e.first_tracked_at, 0)
+                .single()
+                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        };
+        println!("{:<10}  {:>14}  {:>12}  {:>12.1}  {:>10}",
+            dev,
+            fmt_bytes(e.total_bytes_written),
+            fmt_bytes(daily as u64) + "/d",
+            days,
+            started);
+    }
+    Ok(())
+}
+
+fn run_baselines() -> Result<()> {
+    use util::smart_baseline;
+
+    let base_dir = dirs::data_local_dir()
+        .map(|p| p.join("dtop").join("baselines"));
+
+    let dir = match base_dir {
+        Some(d) if d.exists() => d,
+        _ => {
+            println!("No baselines saved yet. Open a device in dtop and press B to save one.");
+            return Ok(());
+        }
+    };
+
+    let mut baselines: Vec<smart_baseline::Baseline> = Vec::new();
+    for entry in std::fs::read_dir(&dir)?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if let Some(bl) = smart_baseline::load(stem) {
+                    baselines.push(bl);
+                }
+            }
+        }
+    }
+
+    if baselines.is_empty() {
+        println!("No baselines saved yet. Open a device in dtop and press B to save one.");
+        return Ok(());
+    }
+
+    baselines.sort_by(|a, b| a.device.cmp(&b.device));
+
+    println!("SMART BASELINES  ({} saved)", baselines.len());
+    println!("{}", "─".repeat(60));
+    println!("{:<10}  {:>12}  {:>14}  {:>10}",
+        "Device", "Saved", "Power-On Hrs", "Attributes");
+    println!("{}", "─".repeat(60));
+    for bl in &baselines {
+        let poh = bl.power_on_hours
+            .map(|h| format!("{}", h))
+            .unwrap_or_else(|| "—".to_string());
+        println!("{:<10}  {:>12}  {:>14}  {:>10}",
+            bl.device, bl.saved_date, poh, bl.attributes.len());
+    }
+    println!("\nUse --device-report DEVICE to compare current SMART against a baseline.");
+    Ok(())
 }
 
 fn run_top_io(count: usize) -> Result<()> {

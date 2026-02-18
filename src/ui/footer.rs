@@ -19,7 +19,7 @@ pub fn render_footer(
     let preset_label = PRESET_NAMES[layout_preset.min(2)];
     let base: &[(&str, &str)] = match panel {
         ActivePanel::Devices => &[
-            ("q", "Quit"), ("Tab", "Focus"), ("↑↓/jk", "Select"),
+            ("q", "Quit"), ("Tab", "Focus"), ("↑↓/jk", "Select"), ("g/G", "Top/Bot"),
             ("Enter/l", "Detail"), ("s", "Sort"), ("f", "Filter"), ("t", "Theme"),
         ],
         ActivePanel::Throughput => &[

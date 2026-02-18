@@ -199,6 +199,23 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, s
     lines.push(kv_colored("Health Score", &hs_str, hs_style, theme));
     lines.push(Line::from(vec![]));
 
+    // ── Partitions ────────────────────────────────────────────────────
+    if !device.partitions.is_empty() {
+        lines.push(section_header("── Partitions ", theme));
+        for p in &device.partitions {
+            let size_str = fmt_bytes(p.size);
+            let fs_str   = p.fs_type.as_deref().unwrap_or("—");
+            let mp_str   = p.mountpoint.as_deref().unwrap_or("—");
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:<14}", p.name), theme.text),
+                Span::styled(format!("{:>9}  ", size_str), theme.text_dim),
+                Span::styled(format!("{:<8}  ", fs_str), theme.text_dim),
+                Span::styled(mp_str.to_string(), theme.ok),
+            ]));
+        }
+        lines.push(Line::from(vec![]));
+    }
+
     // ── Drive endurance / lifespan estimate ───────────────────────────
     if let Some(smart) = &device.smart {
         if let Some(nvme) = &smart.nvme {

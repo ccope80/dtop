@@ -24,6 +24,8 @@ pub enum Action {
     Benchmark,     // b: run quick read benchmark on selected device
     SmartTest,     // x: schedule SMART short self-test on selected device
     FilterDevices, // f: cycle device type filter (All/NVMe/SSD/HDD)
+    JumpTop,       // g: jump to first device / row
+    JumpBottom,    // G: jump to last device / row
     None,
 }
 
@@ -66,6 +68,12 @@ pub fn handle_key(key: KeyEvent) -> Action {
         (KeyCode::Char('b'), _) => Action::Benchmark,
         (KeyCode::Char('x'), _) => Action::SmartTest,
         (KeyCode::Char('f'), _) => Action::FilterDevices,
+
+        // Jump to first / last
+        (KeyCode::Char('g'), _) => Action::JumpTop,
+        (KeyCode::Char('G'), _) => Action::JumpBottom,
+        (KeyCode::Home, _)      => Action::JumpTop,
+        (KeyCode::End,  _)      => Action::JumpBottom,
 
         _ => Action::None,
     }

@@ -628,6 +628,28 @@ impl App {
                 ActiveView::NfsView => {}
             },
 
+            Action::JumpTop => {
+                if self.active_panel == ActivePanel::Devices && !self.detail_open {
+                    let first = if self.device_filter != DeviceFilter::All {
+                        self.filtered_device_indices().into_iter().next()
+                    } else {
+                        if !self.devices.is_empty() { Some(0) } else { None }
+                    };
+                    self.device_list_state.select(first);
+                }
+            }
+
+            Action::JumpBottom => {
+                if self.active_panel == ActivePanel::Devices && !self.detail_open {
+                    let last = if self.device_filter != DeviceFilter::All {
+                        self.filtered_device_indices().into_iter().last()
+                    } else {
+                        if !self.devices.is_empty() { Some(self.devices.len() - 1) } else { None }
+                    };
+                    self.device_list_state.select(last);
+                }
+            }
+
             Action::None => {}
         }
     }
@@ -643,8 +665,17 @@ impl App {
                 let offset = self.device_list_state.offset();
                 let idx = (row - top) as usize + offset;
                 if idx < self.devices.len() {
+                    let already_selected = self.device_list_state.selected() == Some(idx);
                     self.device_list_state.select(Some(idx));
                     self.active_panel = ActivePanel::Devices;
+                    // Clicking an already-selected row toggles detail open/close
+                    if already_selected {
+                        self.detail_open = !self.detail_open;
+                        if self.detail_open {
+                            self.active_panel = ActivePanel::Detail;
+                            self.detail_scroll = 0;
+                        }
+                    }
                 }
             }
         }

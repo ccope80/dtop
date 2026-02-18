@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::util::human::fmt_bytes;
+use crate::util::human::{fmt_bytes, fmt_eta};
 use chrono::Local;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -34,7 +34,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let inner = block.inner(root[1]);
     f.render_widget(block, root[1]);
 
-    let header_cells = ["Mount", "Type", "Size", "Used", "Avail", "Use%", "Inode%", "Device"]
+    let header_cells = ["Mount", "Type", "Size", "Used", "Avail", "Use%", "Inode%", "Fill/day", "ETA", "Device"]
         .iter()
         .map(|h| Cell::from(*h).style(theme.text_dim));
     let header = Row::new(header_cells)
@@ -56,6 +56,34 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     else if pct >= 85.0 || ipct >= 85.0 { " !" }
                     else { "" };
 
+        // Fill rate: "+1.2 GB" per day, or "—"
+        let (rate_str, rate_style) = match fs.fill_rate_bps {
+            Some(r) if r > 1024.0 => {
+                let day = r * 86_400.0;
+                let eta_style = match fs.days_until_full {
+                    Some(d) if d < 3.0  => theme.crit,
+                    Some(d) if d < 14.0 => theme.warn,
+                    _                   => theme.text_dim,
+                };
+                (format!("+{}", fmt_bytes(day as u64)), eta_style)
+            }
+            Some(r) if r < -1024.0 => {
+                let day = (-r) * 86_400.0;
+                (format!("-{}", fmt_bytes(day as u64)), theme.ok)
+            }
+            _ => ("—".to_string(), theme.text_dim),
+        };
+
+        let eta_str = match fs.days_until_full {
+            Some(d) if fs.fill_rate_bps.map_or(false, |r| r > 0.0) => fmt_eta(d),
+            _ => "—".to_string(),
+        };
+        let eta_style = match fs.days_until_full {
+            Some(d) if d < 3.0  => theme.crit,
+            Some(d) if d < 14.0 => theme.warn,
+            _                   => theme.text_dim,
+        };
+
         Row::new(vec![
             Cell::from(fs.mount.clone()),
             Cell::from(fs.fs_type.clone()).style(theme.text_dim),
@@ -64,19 +92,23 @@ pub fn render(f: &mut Frame, app: &mut App) {
             Cell::from(fmt_bytes(fs.avail_bytes)).style(theme.text_dim),
             Cell::from(format!("{:.0}%{}", pct, alert)).style(style),
             Cell::from(inode_str).style(if ipct >= 85.0 { theme.warn } else { theme.text_dim }),
+            Cell::from(rate_str).style(rate_style),
+            Cell::from(eta_str).style(eta_style),
             Cell::from(fs.device.clone()).style(theme.text_dim),
         ])
     }).collect();
 
     let widths = [
-        Constraint::Min(18),
+        Constraint::Min(16),
+        Constraint::Length(6),
         Constraint::Length(8),
-        Constraint::Length(9),
-        Constraint::Length(9),
-        Constraint::Length(9),
+        Constraint::Length(8),
         Constraint::Length(8),
         Constraint::Length(7),
-        Constraint::Min(12),
+        Constraint::Length(6),
+        Constraint::Length(9),
+        Constraint::Length(6),
+        Constraint::Min(10),
     ];
 
     let table = Table::new(rows, widths)

@@ -4,7 +4,12 @@ All notable changes to dtop are documented here.
 
 ## [Unreleased]
 
-## [0.1.0] — 2026-02
+## [0.1.0] — 2026-02-18
+
+### Phase 48 Changes
+- `--iostat` now uses `--interval` (ms) as the poll cadence instead of a fixed 1-second delay
+- `--iostat` `--count` default changed from 10 to 0 (continuous output until Ctrl-C)
+- Mouse click device selection in the device list panel verified and working correctly
 
 ### Core TUI
 - Full-screen interactive dashboard with device list, health scores, I/O sparklines, temperature
@@ -20,7 +25,7 @@ All notable changes to dtop are documented here.
 - Fleet health bar in dashboard header (proportional ok/warn/crit segments)
 - Context-sensitive footer hints per active view
 - Tab cycling through 5 dashboard panels
-- Mouse support: click to select, scroll to navigate, double-click to open detail
+- Mouse support: click to select device in device list, scroll to navigate, double-click to open detail
 - g/G jump to first/last in all views
 - 4 color themes (cycle with t)
 - Config hot-reload every 30s with flash indicator
@@ -54,7 +59,7 @@ All notable changes to dtop are documented here.
 - --top-io, --top-temp, --top-health
 - --health-history DEV [--days N], --health-trend [DEV]
 - --forecast (filesystem fill-rate + ETA)
-- --iostat [DEV] [--count N]
+- --iostat [DEV] [--count N] (respects --interval for poll cadence; --count defaults to 0 for continuous output)
 - --capacity, --disk-info DEV, --disk-model [DEV], --disk-temps
 - --smart-attr DEV ATTR, --smart-errors DEV, --sector-errors [DEV]
 - --partition-table DEV, --blkid, --mount, --lsof DEV|MOUNT

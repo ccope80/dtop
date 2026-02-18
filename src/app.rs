@@ -1094,6 +1094,7 @@ impl App {
     }
 
     /// Filtered slice of devices for the device list panel.
+    #[allow(dead_code)]
     pub fn filtered_devices(&self) -> Vec<&crate::models::device::BlockDevice> {
         let idxs = self.filtered_device_indices();
         idxs.iter().map(|&i| &self.devices[i]).collect()

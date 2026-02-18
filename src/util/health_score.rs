@@ -68,6 +68,7 @@ pub fn health_score(dev: &BlockDevice) -> u8 {
 }
 
 /// Return whether this device has real SMART data (score is meaningful).
+#[allow(dead_code)]
 pub fn has_smart(dev: &BlockDevice) -> bool {
     dev.smart.is_some()
 }

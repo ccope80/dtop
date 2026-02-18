@@ -22,6 +22,7 @@ pub struct DeviceIO {
     pub read_iops:            f64,
     pub write_iops:           f64,
     pub io_util_pct:          f64,
+    #[allow(dead_code)]
     pub queue_depth:          u64,
     pub avg_read_latency_ms:  f64,   // average ms per completed read op
     pub avg_write_latency_ms: f64,   // average ms per completed write op

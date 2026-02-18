@@ -1,6 +1,7 @@
 /// Raw cumulative I/O bytes for one process (one snapshot).
 #[derive(Debug, Clone)]
 pub struct RawProcessIO {
+    #[allow(dead_code)]
     pub pid:         u32,
     pub comm:        String,
     pub uid:         u32,

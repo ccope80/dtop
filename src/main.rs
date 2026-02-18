@@ -20,7 +20,12 @@ use std::io;
 use std::panic;
 
 #[derive(Parser, Debug)]
-#[command(name = "dtop", about = "btop-style disk health monitor", version = "0.1")]
+#[command(
+    name = "dtop",
+    about = "Disk health TUI monitor",
+    version = env!("CARGO_PKG_VERSION"),
+    long_about = None,
+)]
 struct Cli {
     /// Update interval in milliseconds
     #[arg(short, long, default_value_t = 2000)]

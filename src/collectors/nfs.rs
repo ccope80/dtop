@@ -14,11 +14,13 @@ pub struct NfsMountStats {
 }
 
 impl NfsMountStats {
+    #[allow(dead_code)]
     pub fn read_latency_label(&self) -> String {
         if self.read_rtt_ms < 1.0 { format!("{:.2}ms", self.read_rtt_ms) }
         else                       { format!("{:.1}ms", self.read_rtt_ms) }
     }
 
+    #[allow(dead_code)]
     pub fn write_latency_label(&self) -> String {
         if self.write_rtt_ms < 1.0 { format!("{:.2}ms", self.write_rtt_ms) }
         else                        { format!("{:.1}ms", self.write_rtt_ms) }

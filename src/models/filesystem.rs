@@ -27,6 +27,7 @@ impl Filesystem {
     }
 
     /// Returns the short device name ("sda1" from "/dev/sda1").
+    #[allow(dead_code)]
     pub fn short_device(&self) -> &str {
         self.device.trim_start_matches("/dev/").trim_start_matches("mapper/")
     }

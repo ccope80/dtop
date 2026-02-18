@@ -35,6 +35,7 @@ pub struct LvmLv {
     pub name:       String,
     pub vg_name:    String,
     pub size_bytes: u64,
+    #[allow(dead_code)]
     pub attr:       String,
     pub path:       String,
 }
@@ -44,6 +45,7 @@ pub struct LvmPv {
     pub name:       String,
     pub vg_name:    String,
     pub size_bytes: u64,
+    #[allow(dead_code)]
     pub free_bytes: u64,
 }
 

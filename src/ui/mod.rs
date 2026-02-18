@@ -1,0 +1,14 @@
+pub mod alerts_panel;
+pub mod dashboard;
+pub mod detail;
+pub mod device_list;
+pub mod filesystem_bars;
+pub mod filesystem_view;
+pub mod footer;
+pub mod help;
+pub mod nfs_view;
+pub mod process_view;
+pub mod smart_panel;
+pub mod theme;
+pub mod throughput;
+pub mod volume_view;

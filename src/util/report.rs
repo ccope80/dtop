@@ -272,6 +272,128 @@ pub fn generate_html(
     h
 }
 
+// ── Markdown report ──────────────────────────────────────────────────
+
+/// Generate a GitHub-flavored Markdown health report.
+pub fn generate_markdown(
+    devices:     &[BlockDevice],
+    filesystems: &[Filesystem],
+    alerts:      &[Alert],
+    raids:       &[RaidArray],
+    pools:       &[ZfsPool],
+) -> String {
+    use crate::util::health_score::health_score;
+
+    let now      = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let hostname = std::process::Command::new("hostname")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let mut out = String::new();
+
+    out.push_str("# DTop Health Report\n\n");
+    out.push_str(&format!("**Generated:** {}  \n**Host:** {}\n\n", now, hostname));
+
+    // ── Alerts ────────────────────────────────────────────────────────
+    out.push_str(&format!("## Active Alerts ({})\n\n", alerts.len()));
+    if alerts.is_empty() {
+        out.push_str("✓ All systems nominal\n\n");
+    } else {
+        out.push_str("| Severity | Source | Message |\n");
+        out.push_str("|----------|--------|---------|\n");
+        for a in alerts {
+            let sev = match a.severity {
+                Severity::Critical => "🔴 CRIT",
+                Severity::Warning  => "🟡 WARN",
+                Severity::Info     => "🔵 INFO",
+            };
+            out.push_str(&format!("| {} | {} | {} |\n",
+                sev, me(&a.prefix()), me(&a.message)));
+        }
+        out.push('\n');
+    }
+
+    // ── Block devices ─────────────────────────────────────────────────
+    out.push_str(&format!("## Block Devices ({})\n\n", devices.len()));
+    out.push_str("| Device | Type | Model | Capacity | Temp | SMART | Health | POH |\n");
+    out.push_str("|--------|------|-------|----------|------|-------|--------|-----|\n");
+    for dev in devices {
+        let model   = me(dev.model.as_deref().unwrap_or("—"));
+        let cap     = me(&fmt_bytes(dev.capacity_bytes));
+        let temp    = dev.temperature().map(|t| format!("{}°C", t)).unwrap_or_else(|| "—".into());
+        let smart_s = dev.smart.as_ref()
+            .map(|s| s.status.label().trim().to_string())
+            .unwrap_or_else(|| "—".into());
+        let hs  = if dev.smart.is_some() { health_score(dev).to_string() } else { "—".into() };
+        let poh = dev.smart.as_ref().and_then(|s| s.power_on_hours)
+            .map(|h| format!("{} h", h))
+            .unwrap_or_else(|| "—".into());
+        out.push_str(&format!("| **{}** | {} | {} | {} | {} | {} | {} | {} |\n",
+            dev.name, dev.dev_type.label().trim(),
+            model, cap, me(&temp), me(&smart_s), hs, me(&poh)));
+    }
+    out.push('\n');
+
+    // ── Filesystems ───────────────────────────────────────────────────
+    out.push_str(&format!("## Filesystems ({})\n\n", filesystems.len()));
+    out.push_str("| Mount | FS | Total | Used | Avail | Use% | Est. Full |\n");
+    out.push_str("|-------|----|-------|------|-------|------|-----------|\n");
+    for fs in filesystems {
+        let eta = fs.days_until_full
+            .map(|d| format!("~{:.0}d", d))
+            .unwrap_or_else(|| "—".into());
+        out.push_str(&format!("| **{}** | {} | {} | {} | {} | {:.1}% | {} |\n",
+            me(&fs.mount), me(&fs.fs_type),
+            me(&fmt_bytes(fs.total_bytes)), me(&fmt_bytes(fs.used_bytes)),
+            me(&fmt_bytes(fs.avail_bytes)), fs.use_pct(), me(&eta)));
+    }
+    out.push('\n');
+
+    // ── Software RAID ─────────────────────────────────────────────────
+    if !raids.is_empty() {
+        out.push_str(&format!("## Software RAID ({})\n\n", raids.len()));
+        out.push_str("| Array | Level | State | Bitmap | Capacity | Rebuild |\n");
+        out.push_str("|-------|-------|-------|--------|----------|---------|\n");
+        for arr in raids {
+            let state = if arr.degraded {
+                if arr.rebuild_pct.is_some() { "⚠ REBUILDING" } else { "🔴 DEGRADED" }
+            } else { "✓ healthy" };
+            let rebuild = arr.rebuild_pct
+                .map(|p| format!("{:.1}%", p))
+                .unwrap_or_else(|| "—".into());
+            out.push_str(&format!("| **{}** | {} | {} | {} | {} | {} |\n",
+                arr.name, me(&arr.level), state,
+                me(&arr.bitmap), me(&fmt_bytes(arr.capacity_bytes)), me(&rebuild)));
+        }
+        out.push('\n');
+    }
+
+    // ── ZFS pools ─────────────────────────────────────────────────────
+    if !pools.is_empty() {
+        out.push_str(&format!("## ZFS Pools ({})\n\n", pools.len()));
+        out.push_str("| Pool | Health | Size | Alloc | Free | Use% | Scrub |\n");
+        out.push_str("|------|--------|------|-------|------|------|-------|\n");
+        for pool in pools {
+            let health = if pool.is_healthy() { format!("✓ {}", pool.health) } else { format!("🔴 {}", pool.health) };
+            out.push_str(&format!("| **{}** | {} | {} | {} | {} | {:.1}% | {} |\n",
+                pool.name, health,
+                me(&fmt_bytes(pool.size_bytes)), me(&fmt_bytes(pool.alloc_bytes)),
+                me(&fmt_bytes(pool.free_bytes)), pool.use_pct(),
+                me(&pool.scrub_status)));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("---\n*Generated by **dtop** disk health monitor*\n");
+    out
+}
+
+/// Escape pipe characters for Markdown table cells.
+fn me(s: &str) -> String {
+    s.replace('|', "\\|")
+}
+
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
      .replace('<', "&lt;")

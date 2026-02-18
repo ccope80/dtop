@@ -90,7 +90,7 @@ struct Cli {
     #[arg(long)]
     report_html: bool,
 
-    /// Output file path for --report-html (default: dtop-report-TIMESTAMP.html)
+    /// Output file path for --report-html / --report-md (default: auto-named in current dir)
     #[arg(long, value_name = "FILE")]
     output: Option<String>,
 
@@ -169,6 +169,18 @@ struct Cli {
     /// Use deep sleep (hdparm -Y) instead of standby (hdparm -y) with --spindown
     #[arg(long)]
     sleep_mode: bool,
+
+    /// Run fstrim on a specific MOUNTPOINT, or all eligible filesystems if omitted
+    #[arg(long, value_name = "MOUNTPOINT", num_args = 0..=1, default_missing_value = "ALL")]
+    trim: Option<String>,
+
+    /// View or set HDD APM level: DEVICE (view) or DEVICE=LEVEL (set, 1-254 power-save, 255=off)
+    #[arg(long, value_name = "DEVICE[=LEVEL]")]
+    apm: Option<String>,
+
+    /// Generate a Markdown health report and exit (--output sets destination file)
+    #[arg(long)]
+    report_md: bool,
 }
 
 fn main() -> Result<()> {
@@ -229,6 +241,16 @@ fn main() -> Result<()> {
     }
     if let Some(dev) = &cli.spindown {
         return run_spindown(dev, cli.sleep_mode);
+    }
+    if let Some(mp_or_all) = &cli.trim {
+        let mp = if mp_or_all == "ALL" { None } else { Some(mp_or_all.as_str()) };
+        return run_trim(mp);
+    }
+    if let Some(arg) = &cli.apm {
+        return run_apm(arg);
+    }
+    if cli.report_md {
+        return run_report_md(cli.output.as_deref());
     }
     if cli.config {
         return run_print_config();
@@ -629,6 +651,137 @@ fn parse_since(s: &str) -> Option<chrono::Duration> {
         return Some(chrono::Duration::minutes(n.trim().parse::<i64>().ok()?));
     }
     None
+}
+
+fn run_trim(mountpoint: Option<&str>) -> Result<()> {
+    let (args, desc): (Vec<&str>, String) = match mountpoint {
+        None     => (vec!["-v", "-a"], "all eligible filesystems".to_string()),
+        Some(mp) => (vec!["-v", mp],   format!("'{}'", mp)),
+    };
+
+    println!("Running fstrim on {}…", desc);
+
+    let out = std::process::Command::new("fstrim")
+        .args(&args)
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!("fstrim not found. It ships with util-linux (usually pre-installed).")
+            } else {
+                anyhow::anyhow!("Failed to run fstrim: {}", e)
+            }
+        })?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    if out.status.success() {
+        if stdout.trim().is_empty() {
+            println!("✓ TRIM completed.");
+        } else {
+            println!("{}", stdout.trim());
+        }
+    } else {
+        if !stderr.trim().is_empty() { eprintln!("{}", stderr.trim()); }
+        if !stdout.trim().is_empty() { eprintln!("{}", stdout.trim()); }
+        if stderr.contains("Permission denied") || stdout.contains("Permission denied") {
+            eprintln!("Hint: run as root to perform TRIM.");
+        }
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn apm_level_desc(level: u8) -> &'static str {
+    match level {
+        0        => "reserved",
+        1..=127  => "aggressive power saving — spindown enabled",
+        128      => "balanced — minimum power, no spindown",
+        129..=253 => "performance — spindown disabled",
+        254      => "maximum performance",
+        255      => "APM feature disabled (always-on)",
+    }
+}
+
+fn run_apm(arg: &str) -> Result<()> {
+    if let Some((dev, level_str)) = arg.split_once('=') {
+        let dev   = dev.trim_start_matches("/dev/");
+        let level: u8 = level_str.trim().parse().map_err(|_| {
+            anyhow::anyhow!(
+                "Invalid APM level '{}'. Use 1-254 (power-save/spindown) or 255 (disable APM).",
+                level_str
+            )
+        })?;
+
+        let out = std::process::Command::new("hdparm")
+            .args(["-B", &level.to_string(), &format!("/dev/{}", dev)])
+            .output()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    anyhow::anyhow!("hdparm not found. Install: apt install hdparm")
+                } else {
+                    anyhow::anyhow!("Failed to run hdparm: {}", e)
+                }
+            })?;
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if out.status.success() {
+            println!("✓ /dev/{} APM → {}  ({})", dev, level, apm_level_desc(level));
+        } else {
+            eprintln!("✗ hdparm failed (exit {}):\n{}", out.status, stdout.trim());
+            if stdout.contains("Permission denied") || stdout.contains("HDIO") {
+                eprintln!("  Hint: run as root to change APM settings.");
+            }
+            std::process::exit(1);
+        }
+    } else {
+        let dev = arg.trim_start_matches("/dev/");
+        let out = std::process::Command::new("hdparm")
+            .args(["-B", &format!("/dev/{}", dev)])
+            .output()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    anyhow::anyhow!("hdparm not found. Install: apt install hdparm")
+                } else {
+                    anyhow::anyhow!("Failed to run hdparm: {}", e)
+                }
+            })?;
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if stdout.trim().is_empty() {
+            println!("/dev/{}: No APM information (device may not support APM, or run as root).", dev);
+        } else {
+            println!("{}", stdout.trim());
+        }
+    }
+    Ok(())
+}
+
+fn run_report_md(output: Option<&str>) -> Result<()> {
+    use util::report;
+
+    let cfg = config::Config::load();
+    let (devices, filesystems) = report::collect_snapshot();
+    let raids = collectors::mdraid::read_mdstat();
+    let pools = collectors::zfs::read_zpools();
+    let mut all_alerts = alerts::evaluate(&devices, &filesystems, &cfg.alerts);
+    all_alerts.extend(alerts::evaluate_volumes(&raids, &pools));
+    all_alerts.sort_by(|a, b| b.severity.cmp(&a.severity));
+    let md = report::generate_markdown(&devices, &filesystems, &all_alerts, &raids, &pools);
+
+    match output {
+        Some(path) => {
+            std::fs::write(path, &md)?;
+            println!("Report written to: {}", path);
+        }
+        None => {
+            let ts   = chrono::Local::now().format("%Y%m%d-%H%M%S");
+            let path = format!("dtop-report-{}.md", ts);
+            std::fs::write(&path, &md)?;
+            println!("Report written to: {}", path);
+        }
+    }
+    Ok(())
 }
 
 fn read_scheduler(dev: &str) -> Option<(String, Vec<String>)> {

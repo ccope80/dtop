@@ -138,6 +138,8 @@ pub fn render(f: &mut Frame, theme: &Theme, scroll: usize) {
         key_line(theme, "  --secure-erase DEV",    "Secure erase device (--yes required)"),
         key_line(theme, "  --top-health",          "All devices by health score (worst first)"),
         key_line(theme, "  --health-trend [DEV]",  "Multi-day health chart (ASCII)"),
+        key_line(theme, "  --man",    "Print man page (pipe to: man -l -)"),
+        key_line(theme, "  --install","Install binary + man page to /usr/local"),
         key_line(theme, "  --print-service",     "Print systemd unit for daemon"),
         key_line(theme, "  --test-webhook",      "Send test webhook notification"),
         key_line(theme, "  --edit-config",       "Open config in $EDITOR"),

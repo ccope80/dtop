@@ -325,6 +325,14 @@ struct Cli {
     /// Show multi-day health score trend chart for all devices (or one DEVICE)
     #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
     health_trend: Option<String>,
+
+    /// Print a man page for dtop (pipe to: man -l -)
+    #[arg(long)]
+    man: bool,
+
+    /// Install dtop binary, man page, and shell completions to /usr/local
+    #[arg(long)]
+    install: bool,
 }
 
 fn main() -> Result<()> {
@@ -504,6 +512,12 @@ fn main() -> Result<()> {
     if let Some(dev_or_all) = &cli.health_trend {
         let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
         return run_health_trend(dev);
+    }
+    if cli.man {
+        return run_print_man();
+    }
+    if cli.install {
+        return run_install();
     }
     if cli.config {
         return run_print_config();
@@ -4626,5 +4640,334 @@ fn run_secure_erase(device: &str, confirmed: bool) -> Result<()> {
             anyhow::bail!("hdparm --security-erase failed with status {}", erase_status);
         }
     }
+    Ok(())
+}
+
+fn run_print_man() -> Result<()> {
+    let now = chrono::Local::now().format("%B %Y").to_string();
+    print!(r#".TH DTOP 1 "{now}" "dtop" "User Commands"
+.SH NAME
+dtop \- btop\-style disk health monitor for Linux
+.SH SYNOPSIS
+.B dtop
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B dtop
+is an interactive terminal UI and CLI tool for monitoring disk health,
+SMART data, I/O performance, filesystem usage, and storage alerts on Linux.
+.PP
+Without arguments, dtop launches the full-screen TUI.
+With CLI flags it operates as a non-interactive reporting tool.
+.SH TUI KEYBINDINGS
+.SS Global
+.TP
+.B q, Ctrl-C
+Quit
+.TP
+.B ?, F1
+Toggle help overlay (scrollable with \fB\(updo\fR/\fB\(downarrow\fR)
+.TP
+.B t
+Cycle color theme
+.TP
+.B C
+Config overlay (scrollable)
+.TP
+.B Tab / Shift-Tab
+Focus next / previous panel
+.SS Views
+.TP
+.B F2
+Process I/O view
+.TP
+.B F3
+Filesystem overview
+.TP
+.B F4
+RAID / LVM / ZFS volume manager
+.TP
+.B F5
+NFS mount latency view
+.TP
+.B F6
+Alert log viewer (/ to search)
+.SS Dashboard
+.TP
+.B f
+Cycle device filter (All/NVMe/SSD/HDD)
+.TP
+.B s
+Cycle sort order
+.TP
+.B p
+Cycle layout preset
+.TP
+.B a
+Acknowledge all alerts (Enter = ack one)
+.TP
+.B Enter
+Open device detail
+.SS Device Detail
+.TP
+.B w
+Cycle history window (60s/5m/1h)
+.TP
+.B r
+Force SMART re-poll
+.TP
+.B B
+Save SMART baseline snapshot
+.TP
+.B b
+Run sequential read benchmark
+.TP
+.B x
+Schedule SMART short self-test
+.SH CLI OPTIONS
+.SS Monitoring & Reporting
+.TP
+.B \-\-check
+Exit 0=OK, 1=WARN, 2=CRIT (Nagios-compatible)
+.TP
+.B \-\-summary
+One-line status summary with exit code
+.TP
+.B \-\-report
+Human-readable health report
+.TP
+.B \-\-report\-html [\fIFILE\fR]
+Self-contained HTML health report
+.TP
+.B \-\-report\-md [\fIFILE\fR]
+Markdown health report
+.TP
+.B \-\-json
+Full JSON snapshot and exit
+.TP
+.B \-\-csv
+Device snapshot as CSV
+.TP
+.B \-\-watch \fIN\fR
+Rolling status every N seconds
+.TP
+.B \-\-daemon
+Run as headless alert daemon
+.TP
+.B \-\-alerts [\-\-since \fIAGE\fR]
+Show alert log (e.g. \-\-since 7d)
+.TP
+.B \-\-top\-io
+Top processes by disk I/O
+.TP
+.B \-\-top\-temp
+Devices by temperature
+.TP
+.B \-\-top\-health
+Devices by health score (worst first)
+.SS SMART
+.TP
+.B \-\-device\-report \fIDEV\fR
+Full SMART report for one device
+.TP
+.B \-\-smart\-attr \fIDEV ATTR\fR
+Look up one SMART attribute
+.TP
+.B \-\-smart\-errors \fIDEV\fR
+SMART ATA/NVMe error log
+.TP
+.B \-\-sector\-errors [\fIDEV\fR]
+Pending/reallocated sector counts
+.TP
+.B \-\-anomalies
+Show SMART anomaly log
+.TP
+.B \-\-baselines
+List saved SMART baselines
+.TP
+.B \-\-save\-baseline \fIDEV\fR
+Save SMART baseline snapshot
+.TP
+.B \-\-schedule\-test \fIDEV\fR [\-\-long] [\-\-wait]
+Schedule SMART self-test
+.TP
+.B \-\-health\-history \fIDEV\fR [\-\-days \fIN\fR]
+Health score history
+.TP
+.B \-\-health\-trend [\fIDEV\fR]
+Multi-day ASCII health chart
+.SS Device Information
+.TP
+.B \-\-capacity
+Device capacity inventory
+.TP
+.B \-\-disk\-info \fIDEV\fR
+Sysfs device parameters
+.TP
+.B \-\-disk\-model [\fIDEV\fR]
+Model/serial/firmware inventory
+.TP
+.B \-\-disk\-temps
+All device temperatures (cache)
+.TP
+.B \-\-partition\-table \fIDEV\fR
+Partition layout with UUID/FS/mount
+.TP
+.B \-\-blkid
+Block device UUIDs, labels, FS types
+.TP
+.B \-\-queue\-depth [\fIDEV\fR]
+I/O queue depth per device
+.TP
+.B \-\-redundancy
+RAID/ZFS redundancy status
+.TP
+.B \-\-sector\-errors [\fIDEV\fR]
+Pending/reallocated sector counts
+.SS I/O & Performance
+.TP
+.B \-\-iostat [\fIDEV\fR] [\-\-count \fIN\fR]
+Rolling I/O stats
+.TP
+.B \-\-cumulative\-io [\fIDEV\fR]
+Total I/O since boot
+.TP
+.B \-\-io\-pressure
+PSI I/O pressure stall info
+.TP
+.B \-\-bench \fIDEV\fR [\-\-bench\-size \fIN\fR]
+Sequential read benchmark
+.TP
+.B \-\-top\-io
+Top processes by disk I/O
+.SS Filesystem
+.TP
+.B \-\-forecast
+Filesystem fill-rate forecast
+.TP
+.B \-\-mount
+Active mounts with options
+.TP
+.B \-\-du [\fIPATH\fR]
+Top directories by disk usage
+.TP
+.B \-\-trim [\fIMOUNT\fR]
+Run fstrim
+.TP
+.B \-\-trim\-report
+TRIM/discard status per SSD
+.TP
+.B \-\-growfs \fIDEV\fR
+Grow filesystem to fill partition
+.TP
+.B \-\-lsof \fIDEV|MOUNT\fR
+Processes with open files
+.SS Maintenance
+.TP
+.B \-\-spindown \fIDEV\fR [\-\-deep]
+HDD standby via hdparm
+.TP
+.B \-\-apm \fIDEV[=LEVEL]\fR
+View/set HDD APM level
+.TP
+.B \-\-power\-state [\fIDEV\fR]
+HDD power state via hdparm \-C
+.TP
+.B \-\-secure\-erase \fIDEV\fR [\-\-yes]
+Secure erase (DESTRUCTIVE)
+.TP
+.B \-\-scrub [\fIDEV\fR]
+Start/check BTRFS/ZFS/MD scrub
+.TP
+.B \-\-label \fIDEV[=LABEL]\fR
+View/set filesystem label
+.TP
+.B \-\-verify \fIDEV\fR [\-\-size \fIN\fR]
+Read-verify pass
+.SH FILES
+.TP
+.I ~/.config/dtop/dtop.toml
+Configuration file (hot-reloaded every 30s)
+.TP
+.I ~/.local/share/dtop/
+Persistent data: alert log, health history, baselines, anomalies, endurance tracking
+.SH EXAMPLES
+.TP
+Launch TUI:
+.B dtop
+.TP
+Nagios health check:
+.B dtop \-\-check
+.TP
+Full HTML report:
+.B dtop \-\-report\-html /tmp/disk-report.html
+.TP
+Watch a device's SMART errors:
+.B dtop \-\-smart\-errors sda
+.TP
+SMART self-test with wait:
+.B dtop \-\-schedule\-test sda \-\-wait
+.SH SEE ALSO
+.BR smartctl (8),
+.BR hdparm (8),
+.BR fstrim (8),
+.BR btop (1),
+.BR iostat (1)
+.SH AUTHOR
+dtop was built iteratively with Claude Code.
+"#, now = now);
+    Ok(())
+}
+
+fn run_install() -> Result<()> {
+    // Check we're running as root (euid == 0)
+    let euid = unsafe { libc::geteuid() };
+    if euid != 0 {
+        anyhow::bail!("--install requires root. Re-run with: sudo dtop --install");
+    }
+
+    let bin_src = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Cannot find current executable: {}", e))?;
+
+    // 1. Install binary
+    let bin_dst = std::path::Path::new("/usr/local/bin/dtop");
+    println!("Installing binary:  {} -> {}", bin_src.display(), bin_dst.display());
+    std::fs::copy(&bin_src, bin_dst)
+        .map_err(|e| anyhow::anyhow!("Failed to copy binary: {}", e))?;
+    // Make executable
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(bin_dst, std::fs::Permissions::from_mode(0o755))?;
+
+    // 2. Install man page
+    let man_dir = std::path::Path::new("/usr/local/share/man/man1");
+    std::fs::create_dir_all(man_dir)?;
+    let man_dst = man_dir.join("dtop.1");
+    println!("Installing man page: {}", man_dst.display());
+    // Run dtop --man and capture output
+    let man_out = std::process::Command::new(&bin_src)
+        .arg("--man")
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to generate man page: {}", e))?;
+    std::fs::write(&man_dst, &man_out.stdout)?;
+
+    // 3. Install bash completion
+    let comp_dir = std::path::Path::new("/etc/bash_completion.d");
+    if comp_dir.exists() {
+        let comp_dst = comp_dir.join("dtop");
+        println!("Installing bash completion: {}", comp_dst.display());
+        let comp_out = std::process::Command::new(&bin_src)
+            .args(["--completions", "bash"])
+            .output();
+        if let Ok(out) = comp_out {
+            if !out.stdout.is_empty() {
+                let _ = std::fs::write(&comp_dst, &out.stdout);
+            }
+        }
+    }
+
+    println!();
+    println!("dtop installed successfully.");
+    println!("   Binary:     /usr/local/bin/dtop");
+    println!("   Man page:   /usr/local/share/man/man1/dtop.1");
+    println!("   Try: dtop --help   or   man dtop");
     Ok(())
 }

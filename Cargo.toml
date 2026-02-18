@@ -16,6 +16,7 @@ anyhow       = "1"
 chrono       = "0.4"
 toml         = "0.8"
 dirs         = "5"
+libc         = "0.2"
 
 [profile.release]
 opt-level = 3

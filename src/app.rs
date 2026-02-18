@@ -1,6 +1,6 @@
 use crate::alerts::{self, Alert};
 use crate::collectors::{diskstats, filesystem, lsblk, lvm, mdraid, nfs, process_io, smart as smart_collector, smart_cache, zfs};
-use crate::util::{alert_log, webhook};
+use crate::util::{alert_log, smart_anomaly, webhook};
 use crate::config::Config;
 use crate::ui::benchmark_popup;
 use crate::input::{handle_key, Action};
@@ -212,6 +212,12 @@ pub struct App {
     // SMART short test status (device_name -> status_line)
     pub smart_test_status: HashMap<String, String>,
 
+    // SMART anomaly log — first-seen bad attribute timestamps (persisted)
+    pub smart_anomalies: smart_anomaly::AnomalyLog,
+
+    // Alert cooldown — maps alert key → Unix timestamp of last fire (in-memory)
+    alert_fired_at: HashMap<String, i64>,
+
     pub should_quit: bool,
 }
 
@@ -268,6 +274,8 @@ impl App {
             bench_tx,
             bench_rx,
             smart_test_status: HashMap::new(),
+            smart_anomalies:   smart_anomaly::load(),
+            alert_fired_at:    HashMap::new(),
             should_quit:   false,
         };
 
@@ -373,7 +381,9 @@ impl App {
     // ── Alert history ──────────────────────────────────────────────────
 
     fn update_alert_history(&mut self, prev: &[Alert], new: &[Alert]) {
-        let now = chrono::Local::now().format("%H:%M:%S").to_string();
+        let now_ts  = chrono::Local::now().timestamp();
+        let now_str = chrono::Local::now().format("%H:%M:%S").to_string();
+        let cooldown_secs = self.config.alerts.cooldown_hours as i64 * 3600;
         let mut fresh: Vec<Alert> = Vec::new();
 
         for alert in new {
@@ -382,10 +392,19 @@ impl App {
                 format!("{}{}{}", a.severity.label(), a.prefix(), a.message) == key
             });
             if !was_present {
+                // Cooldown check: suppress re-firing if within cooldown window
+                if cooldown_secs > 0 {
+                    if let Some(&last_fired) = self.alert_fired_at.get(&key) {
+                        if now_ts - last_fired < cooldown_secs {
+                            continue;
+                        }
+                    }
+                }
+                self.alert_fired_at.insert(key, now_ts);
                 if self.alert_history.len() >= 50 {
                     self.alert_history.pop_back();
                 }
-                self.alert_history.push_front((now.clone(), alert.clone()));
+                self.alert_history.push_front((now_str.clone(), alert.clone()));
                 fresh.push(alert.clone());
             }
         }
@@ -822,6 +841,7 @@ impl App {
                 dev.partitions     = lb.partitions.clone();
             }
             dev.infer_type();
+            dev.alias = self.config.devices.aliases.get(raw_name).cloned();
             new_devices.push(dev);
         }
 
@@ -871,26 +891,34 @@ impl App {
     }
 
     fn consume_smart_results(&mut self) {
-        let mut cache_dirty = false;
+        let mut cache_dirty   = false;
+        let mut anomaly_dirty = false;
         while let Ok(result) = self.smart_rx.try_recv() {
             self.smart_pending.remove(&result.device_name);
             if let Some(dev) = self.devices.iter_mut().find(|d| d.name == result.device_name) {
                 dev.smart_prev      = dev.smart.clone();
                 dev.smart           = result.data;
                 dev.smart_polled_at = Some(Instant::now());
-                // Push temperature into history
                 if let Some(t) = dev.temperature() {
                     dev.temp_history.push(t as u64);
+                }
+                // Update anomaly log when we have real SMART data
+                if let Some(smart) = &dev.smart.clone() {
+                    if smart_anomaly::update(&mut self.smart_anomalies, &dev.name, smart) {
+                        anomaly_dirty = true;
+                    }
                 }
                 cache_dirty = true;
             }
         }
-        // Persist SMART cache after any updates
         if cache_dirty {
             let cache: smart_cache::SmartCache = self.devices.iter()
                 .filter_map(|d| d.smart.as_ref().map(|s| (d.name.clone(), s.clone())))
                 .collect();
             smart_cache::save(&cache);
+        }
+        if anomaly_dirty {
+            smart_anomaly::save(&self.smart_anomalies);
         }
     }
 

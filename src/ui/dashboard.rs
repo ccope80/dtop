@@ -8,6 +8,8 @@ use crate::ui::{
     smart_panel::render_smart_panel,
     throughput::render_throughput,
 };
+use crate::util::health_score::{health_score, score_style};
+use crate::util::human::fmt_rate;
 use chrono::Local;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -25,17 +27,17 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let area  = f.area();
     let theme = app.theme.clone();
 
-    // ── Root: header | body | footer ───────────────────────────────
+    // ── Root: header (2 lines) | body | footer ─────────────────────
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Min(0),
             Constraint::Length(1),
         ])
         .split(area);
 
-    // ── Header ─────────────────────────────────────────────────────
+    // ── Header line 1: title + alerts + clock ──────────────────────
     let crit_count = app.alerts.iter()
         .filter(|a| a.severity == crate::alerts::Severity::Critical)
         .count();
@@ -55,20 +57,48 @@ pub fn render(f: &mut Frame, app: &mut App) {
                       else if warn_count > 0 { theme.warn }
                       else { theme.text_dim };
 
-    let now  = Local::now().format("%H:%M:%S").to_string();
-    let left = format!(" DTop v0.1 — {} ", app.theme_variant.name());
+    let now   = Local::now().format("%H:%M:%S").to_string();
+    let left  = format!(" DTop v0.1 — {} ", app.theme_variant.name());
     let right = format!(" {} ", now);
-    let pad  = (area.width as usize)
+    let pad   = (area.width as usize)
         .saturating_sub(left.len() + alert_badge.len() + right.len());
 
-    let header = Line::from(vec![
+    let header_line1 = Line::from(vec![
         Span::styled(left, theme.title),
         Span::styled(alert_badge, alert_style),
         Span::styled(" ".repeat(pad), theme.header),
         Span::styled(right, theme.text_dim),
-    ])
-    .style(theme.header);
-    f.render_widget(Paragraph::new(header), root[0]);
+    ]);
+
+    // ── Header line 2: fleet I/O + health distribution ─────────────
+    let total_read:  f64 = app.devices.iter().map(|d| d.read_bytes_per_sec).sum();
+    let total_write: f64 = app.devices.iter().map(|d| d.write_bytes_per_sec).sum();
+    let n = app.devices.len();
+    let mut ok_n = 0usize; let mut warn_n = 0usize; let mut crit_n = 0usize;
+    let mut score_sum = 0u32;
+    for d in &app.devices {
+        let s = health_score(d);
+        score_sum += s as u32;
+        if s >= 80 { ok_n += 1; } else if s >= 50 { warn_n += 1; } else { crit_n += 1; }
+    }
+    let avg_score = if n > 0 { (score_sum / n as u32) as u8 } else { 100 };
+    let avg_style = score_style(avg_score, &theme);
+
+    let fleet_prefix = format!(" Fleet  R:{:>9}  W:{:>9}   {} devs  ", fmt_rate(total_read), fmt_rate(total_write), n);
+    let avg_suffix   = format!("  avg health: {}/100 ", avg_score);
+
+    let mut fleet_spans = vec![Span::styled(fleet_prefix, theme.text_dim)];
+    if ok_n > 0   { fleet_spans.push(Span::styled(format!("{}●", ok_n),   theme.ok));  fleet_spans.push(Span::styled(" ", theme.text_dim)); }
+    if warn_n > 0 { fleet_spans.push(Span::styled(format!("{}●", warn_n), theme.warn)); fleet_spans.push(Span::styled(" ", theme.text_dim)); }
+    if crit_n > 0 { fleet_spans.push(Span::styled(format!("{}●", crit_n), theme.crit)); fleet_spans.push(Span::styled(" ", theme.text_dim)); }
+    fleet_spans.push(Span::styled(avg_suffix, avg_style));
+
+    let header_line2 = Line::from(fleet_spans);
+
+    f.render_widget(
+        Paragraph::new(vec![header_line1, header_line2]).style(theme.header),
+        root[0],
+    );
 
     let body = root[1];
 
@@ -88,7 +118,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
         if let Some(idx) = app.device_list_state.selected() {
             if let Some(dev) = app.devices.get(idx) {
                 let test_status = app.smart_test_status.get(&dev.name).map(|s| s.as_str());
-                render_detail(f, cols[1], dev, app.detail_scroll, app.detail_history_window, test_status, &theme);
+                let anomalies   = app.smart_anomalies.get(&dev.name);
+                render_detail(f, cols[1], dev, app.detail_scroll, app.detail_history_window, test_status, anomalies, &theme);
             }
         }
     } else if area.width < 100 {

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -30,6 +31,9 @@ pub struct GeneralConfig {
 pub struct AlertConfig {
     #[serde(default)]
     pub thresholds: AlertThresholds,
+    /// Suppress re-alerting the same condition for this many hours (0 = no cooldown).
+    #[serde(default)]
+    pub cooldown_hours: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +57,9 @@ pub struct AlertThresholds {
 pub struct DevicesConfig {
     /// Glob-style patterns of devices to exclude (e.g. "loop*", "sr*")
     pub exclude: Vec<String>,
+    /// Friendly aliases for devices: { "sda" = "boot-ssd", "sdb" = "data-hdd" }
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,7 +93,7 @@ impl Default for GeneralConfig {
 
 impl Default for AlertConfig {
     fn default() -> Self {
-        Self { thresholds: AlertThresholds::default() }
+        Self { thresholds: AlertThresholds::default(), cooldown_hours: 0 }
     }
 }
 
@@ -122,6 +129,7 @@ impl Default for DevicesConfig {
     fn default() -> Self {
         Self {
             exclude: vec!["loop*".into(), "sr*".into(), "ram*".into(), "fd*".into()],
+            aliases: HashMap::new(),
         }
     }
 }

@@ -39,6 +39,7 @@ pub struct BlockDevice {
     pub dev_type:       DeviceType,
     pub model:          Option<String>,
     pub serial:         Option<String>,
+    pub alias:          Option<String>,  // friendly label from config [devices.aliases]
     pub capacity_bytes: u64,
     pub rotational:     bool,
     pub transport:      Option<String>,
@@ -76,6 +77,7 @@ impl BlockDevice {
             dev_type:       DeviceType::Unknown,
             model:          None,
             serial:         None,
+            alias:          None,
             capacity_bytes: 0,
             rotational:     false,
             transport:      None,

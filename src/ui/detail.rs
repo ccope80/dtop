@@ -3,6 +3,7 @@ use crate::models::smart::{SmartData, SmartStatus};
 use crate::ui::theme::Theme;
 use crate::util::health_score::{health_score, score_style};
 use crate::util::human::{fmt_bytes, fmt_iops, fmt_pct, fmt_rate};
+use crate::util::smart_anomaly::{self, DeviceAnomalies};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
@@ -25,12 +26,18 @@ pub fn render_detail(
     scroll: usize,
     history_window: usize,
     smart_test_status: Option<&str>,
+    anomalies: Option<&DeviceAnomalies>,
     theme: &Theme,
 ) {
     let win_label = WINDOWS[history_window.min(2)].1;
+    let name_part = if let Some(alias) = &device.alias {
+        format!("{} ({})", device.name, alias)
+    } else {
+        device.name.clone()
+    };
     let title = format!(
         " {} — {}  [w: {} window]",
-        device.name,
+        name_part,
         device.model.as_deref().unwrap_or("Unknown model"),
         win_label
     );
@@ -52,7 +59,7 @@ pub fn render_detail(
         .split(inner);
 
     render_sparklines(f, sections[0], device, history_window, theme);
-    render_info(f, sections[1], device, scroll, smart_test_status, theme);
+    render_info(f, sections[1], device, scroll, smart_test_status, anomalies, theme);
 }
 
 fn render_sparklines(f: &mut Frame, area: Rect, device: &BlockDevice, history_window: usize, theme: &Theme) {
@@ -158,13 +165,14 @@ fn lat_style(ms: f64, theme: &Theme) -> Style {
     else               { theme.crit }
 }
 
-fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, smart_test_status: Option<&str>, theme: &Theme) {
+fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, smart_test_status: Option<&str>, anomalies: Option<&DeviceAnomalies>, theme: &Theme) {
     let mut lines: Vec<Line> = Vec::new();
 
     // ── Device info ───────────────────────────────────────────────────
     lines.push(section_header("── Device Info ", theme));
     lines.push(kv("Type",      device.dev_type.label().trim(), theme));
     lines.push(kv("Capacity",  &fmt_bytes(device.capacity_bytes), theme));
+    if let Some(a) = &device.alias     { lines.push(kv("Alias",     a, theme)); }
     if let Some(s) = &device.serial   { lines.push(kv("Serial",    s, theme)); }
     if let Some(t) = &device.transport { lines.push(kv("Transport", &t.to_uppercase(), theme)); }
 
@@ -320,6 +328,30 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, s
             Span::styled("  Polling… (smartctl runs in background)", theme.text_dim),
         ]));
         lines.push(Line::from(vec![]));
+    }
+
+    // ── SMART anomaly history ─────────────────────────────────────────
+    if let Some(dev_anomalies) = anomalies {
+        if !dev_anomalies.is_empty() {
+            lines.push(section_header("── SMART Anomaly Log ", theme));
+            let mut records: Vec<_> = dev_anomalies.values().collect();
+            records.sort_by_key(|r| r.first_seen);
+            for rec in records {
+                let changed = if rec.last_value != rec.first_value {
+                    format!("  →  now: {}", rec.last_value)
+                } else {
+                    String::new()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {:<28}", rec.attr_name), theme.warn),
+                    Span::styled(
+                        format!("first: {}  val: {}{}", smart_anomaly::fmt_ts(rec.first_seen), rec.first_value, changed),
+                        theme.text_dim,
+                    ),
+                ]));
+            }
+            lines.push(Line::from(vec![]));
+        }
     }
 
     // ── Partition tree ────────────────────────────────────────────────

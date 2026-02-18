@@ -96,6 +96,8 @@ pub fn render(f: &mut Frame, theme: &Theme) {
         key_line(theme, "  --schedule-test DEV", "Schedule SMART self-test"),
         key_line(theme, "  --save-baseline DEV", "Save SMART baseline (no TUI)"),
         key_line(theme, "  --clear-anomalies",   "Clear anomaly log [--yes]"),
+        key_line(theme, "  --print-service",     "Print systemd unit for daemon"),
+        key_line(theme, "  --test-webhook",      "Send test webhook notification"),
         key_line(theme, "  --edit-config",       "Open config in $EDITOR"),
         key_line(theme, "  --config",            "Print current config values"),
         key_line(theme, "  --no-smart",          "Disable SMART polling"),

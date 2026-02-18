@@ -145,6 +145,14 @@ struct Cli {
     /// Skip confirmation prompts (used with --clear-anomalies)
     #[arg(long)]
     yes: bool,
+
+    /// Print a systemd service unit for dtop --daemon and exit
+    #[arg(long)]
+    print_service: bool,
+
+    /// Send a test notification to the configured webhook URL and exit
+    #[arg(long)]
+    test_webhook: bool,
 }
 
 fn main() -> Result<()> {
@@ -189,6 +197,12 @@ fn main() -> Result<()> {
     if let Some(dev_or_all) = &cli.clear_anomalies {
         let device = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
         return run_clear_anomalies(device, cli.yes);
+    }
+    if cli.print_service {
+        return run_print_service();
+    }
+    if cli.test_webhook {
+        return run_test_webhook();
     }
     if cli.config {
         return run_print_config();
@@ -589,6 +603,151 @@ fn parse_since(s: &str) -> Option<chrono::Duration> {
         return Some(chrono::Duration::minutes(n.trim().parse::<i64>().ok()?));
     }
     None
+}
+
+fn run_print_service() -> Result<()> {
+    let exe = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("/usr/local/bin/dtop"));
+    let exe_str = exe.to_string_lossy();
+
+    println!("[Unit]");
+    println!("Description=DTop Disk Health Monitor Daemon");
+    println!("Documentation=https://github.com/ccope80/dtop");
+    println!("After=multi-user.target");
+    println!();
+    println!("[Service]");
+    println!("Type=simple");
+    println!("ExecStart={} --daemon", exe_str);
+    println!("Restart=always");
+    println!("RestartSec=30");
+    println!("User=root");
+    println!("StandardOutput=journal");
+    println!("StandardError=journal");
+    println!("SyslogIdentifier=dtop");
+    println!();
+    println!("[Install]");
+    println!("WantedBy=multi-user.target");
+    println!();
+    println!("# Install:");
+    println!("#   dtop --print-service | sudo tee /etc/systemd/system/dtop.service");
+    println!("#   sudo systemctl daemon-reload");
+    println!("#   sudo systemctl enable --now dtop");
+    println!("#   journalctl -u dtop -f");
+    Ok(())
+}
+
+fn run_test_webhook() -> Result<()> {
+    let cfg = config::Config::load();
+    if cfg.notifications.webhook_url.is_empty() {
+        eprintln!(
+            "No webhook URL configured.\n\
+             Set notifications.webhook_url in ~/.config/dtop/dtop.toml.\n\
+             Use 'dtop --edit-config' to open the config file."
+        );
+        std::process::exit(1);
+    }
+
+    let url = &cfg.notifications.webhook_url;
+    println!("Sending test notification to webhook…");
+    println!("URL: {}", url);
+
+    let hostname = std::process::Command::new("hostname")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let payload = format!(
+        "{{\"text\":\"[dtop] Test notification from {} — webhook integration is working correctly.\"}}",
+        hostname
+    );
+
+    let out = std::process::Command::new("curl")
+        .args([
+            "-s", "-i", "--max-time", "10",
+            "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-d", &payload,
+            url,
+        ])
+        .output()
+        .map_err(|e| anyhow::anyhow!("Failed to run curl: {}\nIs curl installed?", e))?;
+
+    let response = String::from_utf8_lossy(&out.stdout);
+    let status_line = response.lines().next().unwrap_or("(no response)");
+    println!("Response: {}", status_line.trim());
+
+    // HTTP 2xx = success
+    let ok = status_line.contains(" 2");
+    if ok {
+        println!("✓ Webhook delivered successfully.");
+    } else {
+        eprintln!("✗ Webhook delivery may have failed.");
+        let body: String = response.lines()
+            .skip_while(|l| !l.is_empty())
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !body.trim().is_empty() {
+            eprintln!("Body: {}", body.trim());
+        }
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// One entry from a SMART self-test log (ATA or NVMe).
+struct SelfTestEntry {
+    test_type: String,
+    status:    String,
+    hours:     u64,
+    passed:    bool,
+}
+
+/// Run `smartctl --json=c -a /dev/{name}` and parse the self-test log table.
+/// Returns ATA or NVMe entries (whichever the drive reports), newest first.
+fn fetch_selftest_log(name: &str) -> Vec<SelfTestEntry> {
+    use serde_json::Value;
+
+    let out = match std::process::Command::new("smartctl")
+        .args(["--json=c", "-a", &format!("/dev/{}", name)])
+        .output()
+    {
+        Ok(o)  => o,
+        Err(_) => return vec![],
+    };
+
+    let v: Value = match serde_json::from_slice(&out.stdout) {
+        Ok(v)  => v,
+        Err(_) => return vec![],
+    };
+
+    let mut entries: Vec<SelfTestEntry> = Vec::new();
+
+    // ATA drives
+    if let Some(table) = v["ata_smart_self_test_log"]["standard"]["table"].as_array() {
+        for row in table {
+            entries.push(SelfTestEntry {
+                test_type: row["type"]["string"].as_str().unwrap_or("?").to_string(),
+                status:    row["status"]["string"].as_str().unwrap_or("?").to_string(),
+                hours:     row["lifetime_hours"].as_u64().unwrap_or(0),
+                passed:    row["status"]["passed"].as_bool().unwrap_or(false),
+            });
+        }
+    }
+
+    // NVMe drives
+    if let Some(table) = v["nvme_self_test_log"]["table"].as_array() {
+        for row in table {
+            entries.push(SelfTestEntry {
+                test_type: row["self_test_code"]["string"].as_str().unwrap_or("?").to_string(),
+                status:    row["self_test_result"]["string"].as_str().unwrap_or("?").to_string(),
+                hours:     row["power_on_hours"].as_u64().unwrap_or(0),
+                passed:    row["self_test_result"]["value"].as_u64() == Some(0),
+            });
+        }
+    }
+
+    entries
 }
 
 fn run_schedule_test(device: &str, long_test: bool, wait: bool) -> Result<()> {
@@ -1084,6 +1243,22 @@ fn run_device_report(device: &str) -> Result<()> {
                     }
                 }
             }
+        }
+    }
+
+    // Self-test log (second smartctl call, best-effort)
+    let tests = fetch_selftest_log(name);
+    if !tests.is_empty() {
+        println!("\nSELF-TEST LOG  ({} entr{})", tests.len(), if tests.len() == 1 { "y" } else { "ies" });
+        println!("  {:<2}  {:>6}  {:<22}  {}",
+            "", "Hours", "Result", "Test Type");
+        println!("  {}", "─".repeat(58));
+        for t in &tests {
+            let mark = if t.passed { "✓" } else { "✗" };
+            // Truncate long status strings for alignment
+            let status = if t.status.len() > 22 { &t.status[..22] } else { &t.status };
+            println!("  {}   {:>6}  {:<22}  {}",
+                mark, t.hours, status, t.test_type);
         }
     }
 

@@ -253,6 +253,14 @@ struct Cli {
     /// Show partition table for DEVICE augmented with UUID, FS type, and mount
     #[arg(long, value_name = "DEVICE")]
     partition_table: Option<String>,
+
+    /// Display the SMART ATA/NVMe error log for DEVICE via smartctl
+    #[arg(long, value_name = "DEVICE")]
+    smart_errors: Option<String>,
+
+    /// Show top directories by disk usage under PATH (default: current directory)
+    #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
+    du: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -372,6 +380,12 @@ fn main() -> Result<()> {
     }
     if let Some(dev) = &cli.partition_table {
         return run_partition_table(dev);
+    }
+    if let Some(dev) = &cli.smart_errors {
+        return run_smart_errors(dev);
+    }
+    if let Some(path) = &cli.du {
+        return run_du(path);
     }
     if cli.config {
         return run_print_config();
@@ -3213,4 +3227,150 @@ fn restore_terminal() -> Result<()> {
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
     Ok(())
+}
+
+fn run_smart_errors(device: &str) -> Result<()> {
+    use serde_json::Value;
+
+    let name     = device.trim_start_matches("/dev/");
+    let dev_path = format!("/dev/{}", name);
+
+    println!("SMART Error Log — {}\n", dev_path);
+
+    let out = std::process::Command::new("smartctl")
+        .args(["--json=c", "-l", "error", &dev_path])
+        .output()
+        .map_err(|e| anyhow::anyhow!("smartctl failed: {}\nIs smartctl installed?", e))?;
+
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+
+    // ── ATA error log ──────────────────────────────────────────────────
+    if let Some(log) = v.get("ata_smart_error_log") {
+        let section = if log["extended"]["table"].is_array() { "extended" } else { "summary" };
+        let total   = log[section]["count"].as_u64().unwrap_or(0);
+        let table   = log[section]["table"].as_array();
+
+        if total == 0 || table.map_or(true, |t| t.is_empty()) {
+            println!("  No ATA errors logged — drive is healthy.");
+            return Ok(());
+        }
+
+        println!("  ATA Error Count: {total}\n");
+        println!("  {:>5}  {:>8}  {:>14}  {:<10}  Command", "Err#", "Hours", "LBA", "Error");
+        println!("  {}  {}  {}  {}  {}", "─".repeat(5), "─".repeat(8), "─".repeat(14), "─".repeat(10), "─".repeat(30));
+
+        for entry in table.into_iter().flatten() {
+            let err_num = entry["error_number"].as_u64().unwrap_or(0);
+            let hours   = entry["lifetime_hours"].as_u64().unwrap_or(0);
+            let lba     = entry["lba"].as_u64();
+            let err_str = entry["error_register"]["string"]
+                .as_str()
+                .unwrap_or("?");
+            let cmd_str = entry["previous_commands"][0]["command_name"]
+                .as_str()
+                .unwrap_or("?");
+
+            let lba_s = match lba {
+                Some(l) => format!("0x{:012x}", l),
+                None    => "—".to_string(),
+            };
+            println!("  {:>5}  {:>7}h  {:>14}  {:<10}  {}", err_num, hours, lba_s, err_str, cmd_str);
+        }
+
+        if let Some(t) = table {
+            if (total as usize) > t.len() {
+                println!("\n  (Device log holds only the most recent {} entries; {} total recorded.)", t.len(), total);
+            }
+        }
+        return Ok(());
+    }
+
+    // ── NVMe — show health log error summary ───────────────────────────
+    if let Some(h) = v.get("nvme_smart_health_information_log") {
+        let err_entries = h["num_err_log_entries"].as_u64().unwrap_or(0);
+        let media_errs  = h["media_errors"].as_u64().unwrap_or(0);
+        let crit_warn   = h["critical_warning"].as_u64().unwrap_or(0);
+        println!("  NVMe Error Summary:");
+        println!("  Error log entries : {}", err_entries);
+        println!("  Media/data errors : {}", media_errs);
+        println!("  Critical warning  : 0x{:02x}", crit_warn);
+        if err_entries == 0 && media_errs == 0 && crit_warn == 0 {
+            println!("\n  No errors detected — drive is healthy.");
+        } else {
+            println!("\n  Use 'nvme error-log {}' for the full NVMe error log.", dev_path);
+        }
+        return Ok(());
+    }
+
+    // ── Fallback: raw smartctl text ───────────────────────────────────
+    let raw = std::process::Command::new("smartctl")
+        .args(["-l", "error", &dev_path])
+        .output()?;
+    let text = String::from_utf8_lossy(&raw.stdout);
+    for line in text.lines().skip(4) {
+        println!("  {}", line);
+    }
+    Ok(())
+}
+
+fn run_du(path: &str) -> Result<()> {
+    let out = std::process::Command::new("du")
+        .args(["-ahd1", "--", path])
+        .output()
+        .map_err(|e| anyhow::anyhow!("du failed: {}", e))?;
+
+    if !out.status.success() && out.stdout.is_empty() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("{}", stderr.trim());
+    }
+
+    struct DuEntry { bytes: u64, raw_size: String, path: String }
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut entries: Vec<DuEntry> = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(2, '\t');
+        let size_str = match parts.next() { Some(s) => s.trim(), None => continue };
+        let path_str = match parts.next() { Some(p) => p.trim(), None => continue };
+        let bytes = parse_du_size(size_str);
+        entries.push(DuEntry { bytes, raw_size: size_str.to_string(), path: path_str.to_string() });
+    }
+
+    entries.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    let entries: Vec<_> = entries.into_iter().take(20).collect();
+    let max_bytes = entries.first().map_or(1, |e| e.bytes.max(1));
+
+    println!("Disk Usage — {}\n", path);
+    println!("{:>8}  {:<20}  Path", "Size", "Usage");
+    println!("{}", "─".repeat(80));
+
+    const BAR_W: usize = 20;
+    for e in &entries {
+        let filled = ((e.bytes as f64 / max_bytes as f64) * BAR_W as f64).round() as usize;
+        let filled = filled.min(BAR_W);
+        let bar    = format!("{}{}", "█".repeat(filled), "░".repeat(BAR_W - filled));
+        let display_path = if e.path.len() > 50 {
+            format!("…{}", &e.path[e.path.len().saturating_sub(49)..])
+        } else {
+            e.path.clone()
+        };
+        println!("{:>8}  {}  {}", e.raw_size, bar, display_path);
+    }
+    Ok(())
+}
+
+fn parse_du_size(s: &str) -> u64 {
+    let s = s.trim();
+    if s.is_empty() { return 0; }
+    // GNU du -h uses suffixes like "1.5G", "512M", "100K", or bare bytes
+    let last = s.chars().last().unwrap_or('0');
+    let num_part = &s[..s.len() - last.len_utf8()];
+    let n: f64 = num_part.parse().unwrap_or(0.0);
+    match last {
+        'G' => (n * 1_073_741_824.0) as u64,
+        'M' => (n * 1_048_576.0)     as u64,
+        'K' => (n * 1_024.0)         as u64,
+        'T' => (n * 1_099_511_627_776.0) as u64,
+        _   => s.parse().unwrap_or(0),
+    }
 }

@@ -5,9 +5,8 @@ use crate::util::ring_buffer::RingBuffer;
 use chrono::Local;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
-    style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
     Frame,
 };
 use std::collections::HashMap;
@@ -77,7 +76,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             .constraints([Constraint::Min(0)])
             .split(body);
 
-        render_nfs_table(f, rows_area[0], &app.nfs_mounts, &app.nfs_rtt_history, &theme);
+        render_nfs_table(f, rows_area[0], &app.nfs_mounts, &app.nfs_rtt_history, &mut app.nfs_table_state, &theme);
     }
 
     // Footer
@@ -98,6 +97,7 @@ fn render_nfs_table(
     area: ratatui::layout::Rect,
     mounts: &[NfsMountStats],
     rtt_history: &HashMap<String, (RingBuffer, RingBuffer)>,
+    state: &mut TableState,
     theme: &crate::ui::theme::Theme,
 ) {
     let block = Block::default()
@@ -174,9 +174,9 @@ fn render_nfs_table(
     let table = Table::new(rows, widths)
         .header(header)
         .column_spacing(1)
-        .row_highlight_style(Style::default());
+        .row_highlight_style(theme.selected);
 
-    f.render_widget(table, inner);
+    f.render_stateful_widget(table, inner, state);
 }
 
 fn rtt_style(rtt: f64, theme: &crate::ui::theme::Theme) -> ratatui::style::Style {

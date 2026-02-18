@@ -182,6 +182,9 @@ pub struct App {
     // F3 filesystem overview state
     pub fs_table_state: TableState,
 
+    // F5 NFS view state
+    pub nfs_table_state: TableState,
+
     // F2 process I/O state
     pub process_table_state: TableState,
     pub process_sort:        ProcessSort,
@@ -316,6 +319,7 @@ impl App {
             detail_history_window: 0,
             fs_scroll:             0,
             fs_table_state:        TableState::default(),
+            nfs_table_state:       TableState::default(),
             process_table_state:   TableState::default(),
             process_sort:          ProcessSort::WritePerSec,
             volume_scroll:         0,
@@ -637,11 +641,14 @@ impl App {
                 };
             }
             Action::ViewNfs => {
-                self.active_view = if self.active_view == ActiveView::NfsView {
-                    ActiveView::Dashboard
+                if self.active_view == ActiveView::NfsView {
+                    self.active_view = ActiveView::Dashboard;
                 } else {
-                    ActiveView::NfsView
-                };
+                    self.active_view = ActiveView::NfsView;
+                    if !self.nfs_mounts.is_empty() {
+                        self.nfs_table_state.select(Some(0));
+                    }
+                }
             }
 
             Action::ViewAlertLog => {
@@ -824,7 +831,10 @@ impl App {
                 ActiveView::AlertLog => {
                     self.alert_log_scroll = self.alert_log_scroll.saturating_sub(1);
                 }
-                ActiveView::NfsView => {}
+                ActiveView::NfsView => {
+                    let cur = self.nfs_table_state.selected().unwrap_or(0);
+                    if cur > 0 { self.nfs_table_state.select(Some(cur - 1)); }
+                }
             },
 
             Action::ScrollDown => match self.active_view {
@@ -848,7 +858,11 @@ impl App {
                 }
                 ActiveView::VolumeManager => { self.volume_scroll += 1; }
                 ActiveView::AlertLog => { self.alert_log_scroll += 1; }
-                ActiveView::NfsView => {}
+                ActiveView::NfsView => {
+                    let max = self.nfs_mounts.len().saturating_sub(1);
+                    let cur = self.nfs_table_state.selected().unwrap_or(0);
+                    if cur < max { self.nfs_table_state.select(Some(cur + 1)); }
+                }
             },
 
             Action::JumpTop => {
@@ -943,6 +957,16 @@ impl App {
     }
 
     fn select_delta(&mut self, delta: i32) {
+        if self.active_view == ActiveView::NfsView {
+            let cur = self.nfs_table_state.selected().unwrap_or(0);
+            if delta < 0 {
+                if cur > 0 { self.nfs_table_state.select(Some(cur - 1)); }
+            } else {
+                let max = self.nfs_mounts.len().saturating_sub(1);
+                if cur < max { self.nfs_table_state.select(Some(cur + 1)); }
+            }
+            return;
+        }
         if self.devices.is_empty() { return; }
 
         // When a filter is active, skip over non-matching (dimmed) rows.

@@ -181,6 +181,26 @@ struct Cli {
     /// Generate a Markdown health report and exit (--output sets destination file)
     #[arg(long)]
     report_md: bool,
+
+    /// Run a sequential read benchmark on DEVICE and exit (mirrors TUI 'b' key)
+    #[arg(long, value_name = "DEVICE")]
+    bench: Option<String>,
+
+    /// Size of the sequential read in MiB (default 256, used with --bench)
+    #[arg(long, default_value_t = 256)]
+    bench_size: usize,
+
+    /// Show health score history for DEVICE and exit
+    #[arg(long, value_name = "DEVICE")]
+    health_history: Option<String>,
+
+    /// Days of history to display (default 7, used with --health-history; 0 = all)
+    #[arg(long, default_value_t = 7)]
+    days: usize,
+
+    /// Sample filesystem fill rates and print a fill-forecast table, then exit
+    #[arg(long)]
+    forecast: bool,
 }
 
 fn main() -> Result<()> {
@@ -251,6 +271,15 @@ fn main() -> Result<()> {
     }
     if cli.report_md {
         return run_report_md(cli.output.as_deref());
+    }
+    if let Some(dev) = &cli.bench {
+        return run_cli_bench(dev, cli.bench_size);
+    }
+    if let Some(dev) = &cli.health_history {
+        return run_health_history(dev, cli.days);
+    }
+    if cli.forecast {
+        return run_forecast();
     }
     if cli.config {
         return run_print_config();
@@ -2115,6 +2144,179 @@ fn run_diff(file_a: &str, file_b: &str) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+// ── --bench ──────────────────────────────────────────────────────────────────
+
+fn run_cli_bench(device: &str, size_mib: usize) -> Result<()> {
+    let dev_path = if device.starts_with("/dev/") {
+        device.to_string()
+    } else {
+        format!("/dev/{}", device)
+    };
+    let display = device.trim_start_matches("/dev/");
+
+    println!("Running {} MiB sequential read benchmark on {}…", size_mib, dev_path);
+    let out = std::process::Command::new("dd")
+        .args([
+            format!("if={}", dev_path).as_str(),
+            "of=/dev/null",
+            "bs=1M",
+            &format!("count={}", size_mib),
+            "iflag=direct",
+        ])
+        .output()
+        .map_err(|e| anyhow::anyhow!("dd failed: {}", e))?;
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let rate = bench_parse_dd_rate(&stderr).or_else(|| bench_parse_dd_rate(&stdout));
+
+    match rate {
+        Some(mbps) => println!("{}: {:.1} MB/s  ({} MiB sequential read, O_DIRECT)", display, mbps, size_mib),
+        None => {
+            eprintln!("Could not parse dd output:\n{}", stderr.trim());
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
+fn bench_parse_dd_rate(s: &str) -> Option<f64> {
+    // e.g. "268435456 bytes (268 MB, 256 MiB) copied, 1.23 s, 218 MB/s"
+    let last = s.lines().last()?;
+    let parts: Vec<&str> = last.split_whitespace().collect();
+    for i in 1..parts.len() {
+        let unit = parts[i];
+        if unit.eq_ignore_ascii_case("MB/s") || unit.eq_ignore_ascii_case("MiB/s") {
+            return parts[i - 1].parse::<f64>().ok();
+        }
+        if unit.eq_ignore_ascii_case("GB/s") || unit.eq_ignore_ascii_case("GiB/s") {
+            return parts[i - 1].parse::<f64>().ok().map(|v| v * 1024.0);
+        }
+        if unit.eq_ignore_ascii_case("kB/s") || unit.eq_ignore_ascii_case("KiB/s") {
+            return parts[i - 1].parse::<f64>().ok().map(|v| v / 1024.0);
+        }
+    }
+    None
+}
+
+// ── --health-history ──────────────────────────────────────────────────────────
+
+fn run_health_history(device: &str, days: usize) -> Result<()> {
+    use util::health_history;
+
+    let mut all = health_history::load();
+    let name = device.trim_start_matches("/dev/");
+    let scores = all.remove(name).unwrap_or_default();
+
+    if scores.is_empty() {
+        println!("No health history for '{}'. Run dtop or dtop --daemon to collect data.", name);
+        return Ok(());
+    }
+
+    // Each entry ≈ one 5-min SMART poll interval → 288 entries/day
+    let entries_per_day = 288usize;
+    let max_entries = if days == 0 { scores.len() } else { (days * entries_per_day).max(1) };
+    let start = scores.len().saturating_sub(max_entries);
+    let recent = &scores[start..];
+
+    let hours = recent.len() as f64 * 5.0 / 60.0;
+    let min  = recent.iter().copied().min().unwrap_or(0);
+    let max  = recent.iter().copied().max().unwrap_or(0);
+    let avg  = recent.iter().copied().map(|v| v as f64).sum::<f64>() / recent.len() as f64;
+    let cur  = *recent.last().unwrap_or(&0);
+
+    println!("Health history — {}  ({} entries, ~{:.1}h)", name, recent.len(), hours);
+    println!("  Current: {:>3}   Min: {:>3}   Max: {:>3}   Avg: {:.1}", cur, min, max, avg);
+    println!("  Trend (oldest → newest):");
+    println!("    {}", health_sparkline(recent, 64));
+    println!("    ▁=low  ▄=50  █=100");
+
+    // If small enough, also show a per-entry bar table
+    if recent.len() <= 24 {
+        println!();
+        println!("  {:>4}  Score  Bar", "#");
+        for (i, &s) in recent.iter().enumerate() {
+            let bar_len = (s as usize * 30 / 100).min(30);
+            let bar: String = "█".repeat(bar_len);
+            println!("  {:>4}    {:>3}  {}", i + 1, s, bar);
+        }
+    }
+    Ok(())
+}
+
+fn health_sparkline(scores: &[u8], width: usize) -> String {
+    const BLOCKS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if scores.is_empty() { return String::new(); }
+
+    if scores.len() <= width {
+        scores.iter().map(|&s| BLOCKS[(s as usize * 8 / 100).min(8)]).collect()
+    } else {
+        (0..width).map(|i| {
+            let lo = i * scores.len() / width;
+            let hi = ((i + 1) * scores.len() / width).min(scores.len());
+            let avg = scores[lo..hi].iter().map(|&v| v as f64).sum::<f64>() / (hi - lo) as f64;
+            BLOCKS[(avg as usize * 8 / 100).min(8)]
+        }).collect()
+    }
+}
+
+// ── --forecast ────────────────────────────────────────────────────────────────
+
+fn run_forecast() -> Result<()> {
+    use collectors::filesystem;
+    use util::human::fmt_bytes;
+
+    print!("Sampling fill rates (2 s)…");
+    use std::io::Write;
+    std::io::stdout().flush()?;
+
+    let snap1 = filesystem::read_filesystems()?;
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let snap2 = filesystem::read_filesystems()?;
+    let elapsed = 2.0f64;
+
+    // Clear the sampling line
+    println!("\r{:30}", "");
+
+    println!("{:<28}  {:>8}  {:>8}  {:>6}  {:>10}  Est.Full",
+        "Mount", "Size", "Avail", "Use%", "Fill Rate");
+    println!("{}", "─".repeat(80));
+
+    for fs2 in &snap2 {
+        let fill_bps = snap1.iter()
+            .find(|f| f.mount == fs2.mount)
+            .map(|f| (fs2.used_bytes as f64 - f.used_bytes as f64) / elapsed);
+
+        let rate_str = match fill_bps {
+            None => "stable".to_string(),
+            Some(f) if f.abs() < 512.0 => "stable".to_string(),
+            Some(f) if f > 0.0 => format!("+{}/s", fmt_bytes(f as u64)),
+            Some(f) => format!("-{}/s", fmt_bytes((-f) as u64)),
+        };
+
+        let eta_str = match fill_bps {
+            Some(f) if f > 512.0 => {
+                let days = fs2.avail_bytes as f64 / f / 86400.0;
+                if days < 1.0      { format!("{:.0}h",  days * 24.0) }
+                else if days < 30.0 { format!("{:.0}d",  days) }
+                else if days < 365.0 { format!("{:.0}w", days / 7.0) }
+                else               { format!("{:.1}y",  days / 365.0) }
+            }
+            _ => "—".to_string(),
+        };
+
+        println!("{:<28}  {:>8}  {:>8}  {:>5.1}%  {:>10}  {}",
+            fs2.mount,
+            fmt_bytes(fs2.total_bytes),
+            fmt_bytes(fs2.avail_bytes),
+            fs2.use_pct(),
+            rate_str,
+            eta_str,
+        );
+    }
     Ok(())
 }
 

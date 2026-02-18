@@ -93,6 +93,22 @@ struct Cli {
     /// Output file path for --report-html (default: dtop-report-TIMESTAMP.html)
     #[arg(long, value_name = "FILE")]
     output: Option<String>,
+
+    /// Only show alerts newer than this duration (e.g. 24h, 7d, 30m) — used with --alerts
+    #[arg(long, value_name = "DURATION")]
+    since: Option<String>,
+
+    /// Show top processes by disk I/O (2-second sample) and exit
+    #[arg(long)]
+    top_io: bool,
+
+    /// Number of processes to show with --top-io (default 10)
+    #[arg(long, default_value_t = 10)]
+    count: usize,
+
+    /// Print a detailed per-device SMART report and exit
+    #[arg(long, value_name = "DEVICE")]
+    device_report: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -111,7 +127,13 @@ fn main() -> Result<()> {
         return run_check(!cli.no_smart);
     }
     if cli.alerts {
-        return run_alerts(cli.last);
+        return run_alerts(cli.last, cli.since.as_deref());
+    }
+    if cli.top_io {
+        return run_top_io(cli.count);
+    }
+    if let Some(dev) = &cli.device_report {
+        return run_device_report(dev);
     }
     if cli.config {
         return run_print_config();
@@ -395,15 +417,37 @@ fn run_print_config() -> Result<()> {
     Ok(())
 }
 
-fn run_alerts(n: usize) -> Result<()> {
+fn run_alerts(n: usize, since: Option<&str>) -> Result<()> {
     use util::alert_log;
     use alerts::Severity;
+    use chrono::NaiveDateTime;
 
-    let entries = alert_log::load_recent(n);
-    if entries.is_empty() {
-        println!("No alerts in log.");
-        return Ok(());
-    }
+    let entries = if let Some(since_str) = since {
+        let duration = parse_since(since_str).ok_or_else(|| {
+            anyhow::anyhow!("Invalid --since value '{}'. Use format like 24h, 7d, or 30m.", since_str)
+        })?;
+        let cutoff = chrono::Local::now().naive_local() - duration;
+        let mut all = alert_log::load_all();  // newest-first
+        all.retain(|(ts, _)| {
+            NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S")
+                .map(|t| t >= cutoff)
+                .unwrap_or(false)
+        });
+        all.reverse();  // oldest-first for display
+        if all.is_empty() {
+            println!("No alerts in the last {}.", since_str);
+            return Ok(());
+        }
+        all
+    } else {
+        let entries = alert_log::load_recent(n);
+        if entries.is_empty() {
+            println!("No alerts in log.");
+            return Ok(());
+        }
+        entries
+    };
+
     for (ts, alert) in &entries {
         let sev = match alert.severity {
             Severity::Critical => "CRIT",
@@ -412,6 +456,228 @@ fn run_alerts(n: usize) -> Result<()> {
         };
         println!("{} [{}] {}", ts, sev, alert.message);
     }
+    Ok(())
+}
+
+fn parse_since(s: &str) -> Option<chrono::Duration> {
+    let s = s.trim().to_lowercase();
+    if let Some(n) = s.strip_suffix('h') {
+        return Some(chrono::Duration::hours(n.trim().parse::<i64>().ok()?));
+    }
+    if let Some(n) = s.strip_suffix('d') {
+        return Some(chrono::Duration::days(n.trim().parse::<i64>().ok()?));
+    }
+    if let Some(n) = s.strip_suffix('m') {
+        return Some(chrono::Duration::minutes(n.trim().parse::<i64>().ok()?));
+    }
+    None
+}
+
+fn run_top_io(count: usize) -> Result<()> {
+    use collectors::process_io;
+    use std::collections::HashMap;
+    use util::human::fmt_rate;
+
+    eprintln!("Sampling I/O for 2 seconds…");
+    let snap1 = process_io::read_all();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let snap2 = process_io::read_all();
+
+    let mut uid_cache: HashMap<u32, String> = HashMap::new();
+    let mut rates = process_io::compute_rates(&snap1, &snap2, 2.0, &mut uid_cache);
+    rates.sort_by(|a, b| {
+        b.total_per_sec().partial_cmp(&a.total_per_sec()).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if rates.is_empty() {
+        println!("No process I/O detected in the sampling window.");
+        return Ok(());
+    }
+
+    let n = count.min(rates.len());
+    println!("{:>7}  {:<16}  {:<12}  {:>10}  {:>10}  {:>10}",
+        "PID", "COMMAND", "USER", "READ/s", "WRITE/s", "TOTAL/s");
+    println!("{}", "─".repeat(73));
+    for r in &rates[..n] {
+        let comm = r.comm.chars().take(16).collect::<String>();
+        let user = r.username.chars().take(12).collect::<String>();
+        println!("{:>7}  {:<16}  {:<12}  {:>10}  {:>10}  {:>10}",
+            r.pid, comm, user,
+            fmt_rate(r.read_per_sec), fmt_rate(r.write_per_sec), fmt_rate(r.total_per_sec()));
+    }
+    Ok(())
+}
+
+fn run_device_report(device: &str) -> Result<()> {
+    use collectors::{lsblk, smart as smart_collector};
+    use models::device::BlockDevice;
+    use util::{health_score, human::fmt_bytes, smart_attr_desc};
+
+    let name = device.trim_start_matches("/dev/");
+    let devs = lsblk::run_lsblk().unwrap_or_default();
+    let lsblk_dev = devs.iter().find(|d| d.name == name);
+
+    let lsblk_dev = match lsblk_dev {
+        Some(d) => d,
+        None => {
+            eprintln!("Device '{}' not found. Available devices:", name);
+            for d in &devs { eprintln!("  /dev/{}", d.name); }
+            std::process::exit(1);
+        }
+    };
+
+    let mut dev = BlockDevice::new(lsblk_dev.name.clone());
+    dev.model          = lsblk_dev.model.clone();
+    dev.serial         = lsblk_dev.serial.clone();
+    dev.capacity_bytes = lsblk_dev.size;
+    dev.rotational     = lsblk_dev.rotational;
+    dev.transport      = lsblk_dev.transport.clone();
+    dev.partitions     = lsblk_dev.partitions.clone();
+    dev.infer_type();
+
+    eprintln!("Polling SMART data for /dev/{}…", name);
+    dev.smart = smart_collector::poll_device(name);
+
+    let bar = "═".repeat(72);
+    println!("{}", bar);
+    println!("  DTop Device Report — /dev/{}", name);
+    println!("{}", bar);
+
+    println!("\nIDENTITY");
+    println!("  Name       : /dev/{}", name);
+    if let Some(m) = &dev.model  { println!("  Model      : {}", m); }
+    if let Some(s) = &dev.serial { println!("  Serial     : {}", s); }
+    println!("  Type       : {}", dev.dev_type.label().trim());
+    println!("  Capacity   : {}", fmt_bytes(dev.capacity_bytes));
+    if let Some(t) = &dev.transport { println!("  Transport  : {}", t); }
+    if !dev.partitions.is_empty() {
+        let parts: Vec<String> = dev.partitions.iter().map(|p| p.name.clone()).collect();
+        println!("  Partitions : {}", parts.join(", "));
+    }
+
+    match &dev.smart {
+        None => {
+            println!("\nSMART data unavailable (device may not support SMART, or smartctl not installed).");
+        }
+        Some(smart) => {
+            let score = health_score::health_score(&dev);
+            println!("\nHEALTH SUMMARY");
+            println!("  Score      : {} / 100", score);
+            println!("  Status     : {}", smart.status.label().trim());
+            if let Some(t) = smart.temperature {
+                let crit = if dev.rotational { t >= 60 } else { t >= 70 };
+                let warn = if dev.rotational { t >= 50 } else { t >= 55 };
+                let flag = if crit { "  ← CRITICAL" } else if warn { "  ← WARNING" } else { "" };
+                println!("  Temperature: {}°C{}", t, flag);
+            }
+            if let Some(h) = smart.power_on_hours {
+                println!("  Power-On   : {} h  ({:.1} yr)", h, h as f64 / 8760.0);
+            }
+
+            // Score breakdown
+            println!("\nSCORE BREAKDOWN");
+            let mut total_ded: i32 = 0;
+            if smart.status == crate::models::smart::SmartStatus::Warning {
+                println!("  -10  SMART status Warning");
+                total_ded += 10;
+            }
+            if let Some(t) = smart.temperature {
+                let ded: i32 = if dev.rotational {
+                    if t >= 60 { 20 } else if t >= 50 { 10 } else { 0 }
+                } else {
+                    if t >= 70 { 20 } else if t >= 55 { 10 } else { 0 }
+                };
+                if ded > 0 { println!("  -{:2}  Temperature {}°C", ded, t); total_ded += ded; }
+            }
+            for attr in &smart.attributes {
+                let ded: i32 = match attr.id {
+                    5   => if attr.raw_value > 100 { 30 } else if attr.raw_value > 0 { 15 } else { 0 },
+                    197 => if attr.raw_value > 0 { 25 } else { 0 },
+                    198 => if attr.raw_value > 0 { 40 } else { 0 },
+                    _   => 0,
+                };
+                if ded > 0 {
+                    println!("  -{:2}  Attr {:>3} ({}) raw={}", ded, attr.id, attr.name, attr.raw_value);
+                    total_ded += ded;
+                }
+            }
+            if let Some(nvme) = &smart.nvme {
+                let ded: i32 = match nvme.percentage_used {
+                    90..=u8::MAX => 30, 70..=89 => 15, 50..=69 => 5, _ => 0,
+                };
+                if ded > 0 { println!("  -{:2}  NVMe wear {}% used", ded, nvme.percentage_used); total_ded += ded; }
+                if nvme.media_errors > 0 { println!("  -25  NVMe media errors: {}", nvme.media_errors); total_ded += 25; }
+                if nvme.available_spare_pct < nvme.available_spare_threshold {
+                    println!("  -20  NVMe spare below threshold ({}% < {}%)",
+                        nvme.available_spare_pct, nvme.available_spare_threshold);
+                    total_ded += 20;
+                }
+            }
+            if total_ded == 0 {
+                println!("  (no deductions — healthy)");
+            } else {
+                println!("  ────  Final score: {} (100 − {})", score, total_ded);
+            }
+
+            // ATA SMART attributes table
+            if !smart.attributes.is_empty() {
+                println!("\nATA SMART ATTRIBUTES");
+                println!("  {:>3}  {:<34}  {:>5}/{:>5}/{:>5}  {:<14}  {}",
+                    "ID", "Name", "Val", "Wst", "Thr", "Raw", "Flags");
+                println!("  {}", "─".repeat(82));
+                for attr in &smart.attributes {
+                    let flags = format!("{}{}",
+                        if attr.prefail { "P" } else { "-" },
+                        if attr.is_at_risk() { " RISK" } else { "" });
+                    println!("  {:>3}  {:<34}  {:>5}/{:>5}/{:>5}  {:<14}  {}",
+                        attr.id, attr.name,
+                        attr.value, attr.worst, attr.thresh,
+                        attr.raw_str, flags);
+                    if let Some(desc) = smart_attr_desc::describe(attr.id) {
+                        println!("       ↳ {}", desc);
+                    }
+                }
+            }
+
+            // NVMe health log
+            if let Some(nvme) = &smart.nvme {
+                println!("\nNVMe HEALTH LOG");
+                let cw_flag = if nvme.critical_warning != 0 { "  ← WARNING" } else { "" };
+                println!("  Critical Warning  : 0x{:02X}{}", nvme.critical_warning, cw_flag);
+                println!("  Temperature       : {}°C", nvme.temperature_celsius);
+                let spare_flag = if nvme.available_spare_pct < nvme.available_spare_threshold {
+                    "  ← below threshold!"
+                } else { "" };
+                println!("  Available Spare   : {}%  (threshold: {}%){}",
+                    nvme.available_spare_pct, nvme.available_spare_threshold, spare_flag);
+                println!("  Percentage Used   : {}%", nvme.percentage_used);
+                println!("  Data Read         : {}", fmt_bytes(nvme.bytes_read()));
+                println!("  Data Written      : {}", fmt_bytes(nvme.bytes_written()));
+                println!("  Power-On Hours    : {}", nvme.power_on_hours);
+                println!("  Unsafe Shutdowns  : {}", nvme.unsafe_shutdowns);
+                let me_flag = if nvme.media_errors > 0 { "  ← WARNING" } else { "" };
+                println!("  Media Errors      : {}{}", nvme.media_errors, me_flag);
+                println!("  Error Log Entries : {}", nvme.error_log_entries);
+
+                // Wear projection
+                if nvme.power_on_hours > 24 && nvme.percentage_used > 0 {
+                    let days_active = nvme.power_on_hours as f64 / 24.0;
+                    let daily_rate  = nvme.percentage_used as f64 / days_active;
+                    let remain_pct  = 100u64.saturating_sub(nvme.percentage_used as u64) as f64;
+                    if daily_rate > 0.0 {
+                        let days_left  = remain_pct / daily_rate;
+                        let years_left = days_left / 365.25;
+                        println!("\nNVMe WEAR PROJECTION");
+                        println!("  Wear Rate         : {:.5}%/day", daily_rate);
+                        println!("  Estimated Life    : ~{:.0} days  ({:.1} yr remaining)",
+                            days_left, years_left);
+                    }
+                }
+            }
+        }
+    }
+
+    println!();
     Ok(())
 }
 

@@ -218,6 +218,9 @@ pub struct App {
     // Alert cooldown — maps alert key → Unix timestamp of last fire (in-memory)
     alert_fired_at: HashMap<String, i64>,
 
+    // Filesystem usage history for fill-rate computation: mount → [(Instant, used_bytes)]
+    fs_usage_history: HashMap<String, VecDeque<(Instant, u64)>>,
+
     pub should_quit: bool,
 }
 
@@ -276,6 +279,7 @@ impl App {
             smart_test_status: HashMap::new(),
             smart_anomalies:   smart_anomaly::load(),
             alert_fired_at:    HashMap::new(),
+            fs_usage_history:  HashMap::new(),
             should_quit:   false,
         };
 
@@ -776,7 +780,30 @@ impl App {
             }
         }
 
-        if let Ok(fs) = filesystem::read_filesystems() {
+        if let Ok(mut fs) = filesystem::read_filesystems() {
+            let now = Instant::now();
+            // Keep up to 150 samples (~5 min at 2 s default) per mount
+            const HISTORY_CAP: usize = 150;
+            const MIN_SAMPLES: usize = 3;  // need at least a few to get a stable rate
+            for f in &mut fs {
+                let hist = self.fs_usage_history
+                    .entry(f.mount.clone())
+                    .or_default();
+                hist.push_back((now, f.used_bytes));
+                if hist.len() > HISTORY_CAP { hist.pop_front(); }
+
+                if hist.len() >= MIN_SAMPLES {
+                    let (t0, u0) = hist.front().copied().unwrap();
+                    let (t1, u1) = hist.back().copied().unwrap();
+                    let secs = t1.duration_since(t0).as_secs_f64().max(0.001);
+                    let delta = u1 as f64 - u0 as f64;
+                    let rate  = delta / secs;           // bytes/sec, may be negative
+                    f.fill_rate_bps = Some(rate);
+                    if rate > 0.0 && f.avail_bytes > 0 {
+                        f.days_until_full = Some(f.avail_bytes as f64 / rate / 86_400.0);
+                    }
+                }
+            }
             self.filesystems = fs;
         }
 
@@ -842,6 +869,16 @@ impl App {
             }
             dev.infer_type();
             dev.alias = self.config.devices.aliases.get(raw_name).cloned();
+
+            // I/O scheduler — /sys/block/<name>/queue/scheduler
+            let sched_path = format!("/sys/block/{}/queue/scheduler", raw_name);
+            dev.io_scheduler = std::fs::read_to_string(&sched_path).ok().and_then(|s| {
+                // Format: "mq-deadline [none] bfq" — extract bracketed entry
+                let start = s.find('[')?;
+                let end   = s.find(']')?;
+                Some(s[start + 1..end].trim().to_string())
+            });
+
             new_devices.push(dev);
         }
 

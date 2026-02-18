@@ -40,6 +40,7 @@ pub struct BlockDevice {
     pub model:          Option<String>,
     pub serial:         Option<String>,
     pub alias:          Option<String>,  // friendly label from config [devices.aliases]
+    pub io_scheduler:   Option<String>,  // active I/O scheduler from sysfs
     pub capacity_bytes: u64,
     pub rotational:     bool,
     pub transport:      Option<String>,
@@ -78,6 +79,7 @@ impl BlockDevice {
             model:          None,
             serial:         None,
             alias:          None,
+            io_scheduler:   None,
             capacity_bytes: 0,
             rotational:     false,
             transport:      None,

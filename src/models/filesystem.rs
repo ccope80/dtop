@@ -9,6 +9,10 @@ pub struct Filesystem {
     pub avail_bytes: u64,
     pub total_inodes: u64,
     pub free_inodes:  u64,
+
+    // Fill rate tracking (computed in App::collect_fast)
+    pub fill_rate_bps:   Option<f64>,  // bytes/sec (positive = filling, negative = shrinking)
+    pub days_until_full: Option<f64>,  // projected days until avail_bytes == 0
 }
 
 impl Filesystem {

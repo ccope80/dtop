@@ -2,7 +2,7 @@ use crate::models::device::BlockDevice;
 use crate::models::smart::{SmartData, SmartStatus};
 use crate::ui::theme::Theme;
 use crate::util::health_score::{health_score, score_style};
-use crate::util::human::{fmt_bytes, fmt_iops, fmt_pct, fmt_rate};
+use crate::util::human::{fmt_bytes, fmt_duration_short, fmt_iops, fmt_pct, fmt_rate};
 use crate::util::smart_anomaly::{self, DeviceAnomalies};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -175,6 +175,15 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, scroll: usize, s
     if let Some(a) = &device.alias     { lines.push(kv("Alias",     a, theme)); }
     if let Some(s) = &device.serial   { lines.push(kv("Serial",    s, theme)); }
     if let Some(t) = &device.transport { lines.push(kv("Transport", &t.to_uppercase(), theme)); }
+    if let Some(sched) = &device.io_scheduler {
+        lines.push(kv("I/O Scheduler", sched, theme));
+    }
+
+    // SMART poll age
+    if let Some(polled_at) = device.smart_polled_at {
+        let age_secs = polled_at.elapsed().as_secs();
+        lines.push(kv("SMART Last Poll", &fmt_duration_short(age_secs), theme));
+    }
 
     // Health score
     let (hs_str, hs_style) = if device.smart.is_some() {

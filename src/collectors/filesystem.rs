@@ -63,5 +63,7 @@ fn statvfs_for(device: &str, mount: &str, fs_type: &str) -> Result<Filesystem> {
         avail_bytes,
         total_inodes: stat.files(),
         free_inodes:  stat.files_free(),
+        fill_rate_bps:   None,
+        days_until_full: None,
     })
 }

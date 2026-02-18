@@ -32,3 +32,18 @@ pub fn fmt_iops(iops: f64) -> String {
 pub fn fmt_pct(pct: f64) -> String {
     format!("{:.0}%", pct)
 }
+
+/// Format a duration (seconds) as a compact human string: "45s", "12m", "3h 5m", "2d 6h"
+pub fn fmt_duration_short(secs: u64) -> String {
+    if secs < 60        { format!("{}s", secs) }
+    else if secs < 3600 { format!("{}m {}s", secs / 60, secs % 60) }
+    else if secs < 86_400 { format!("{}h {}m", secs / 3600, (secs % 3600) / 60) }
+    else                { format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600) }
+}
+
+/// Format a fill ETA in days: "2.3d", "45d", ">1yr"
+pub fn fmt_eta(days: f64) -> String {
+    if days > 365.0       { ">1yr".to_string() }
+    else if days > 30.0   { format!("{:.0}d", days) }
+    else                  { format!("{:.1}d", days) }
+}

@@ -4,6 +4,7 @@ use crate::models::smart::{SmartData, SmartStatus};
 use crate::ui::theme::Theme;
 use crate::util::health_score::{health_score, score_style};
 use crate::util::human::{fmt_bytes, fmt_duration_short, fmt_iops, fmt_pct, fmt_rate};
+use crate::util::ring_buffer::RingBuffer;
 use crate::util::smart_anomaly::{self, DeviceAnomalies};
 use crate::util::smart_attr_desc;
 use crate::util::smart_baseline::Baseline;
@@ -172,6 +173,19 @@ fn lat_style(ms: f64, theme: &Theme) -> Style {
     else if ms < 5.0   { theme.ok }
     else if ms < 20.0  { theme.warn }
     else               { theme.crit }
+}
+
+const SPARKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+fn temp_sparkline(rb: &RingBuffer, width: usize) -> (String, u64, u64) {
+    let samples = rb.last_n(width);
+    if samples.is_empty() { return ("".to_string(), 0, 0); }
+    let min = *samples.iter().min().unwrap();
+    let max = (*samples.iter().max().unwrap()).max(min + 1);
+    let spark: String = samples.iter().map(|&v| {
+        SPARKS[(((v - min) * 7 / (max - min)) as usize).min(7)]
+    }).collect();
+    (spark, min, max)
 }
 
 fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[Filesystem], scroll: usize, smart_test_status: Option<&str>, anomalies: Option<&DeviceAnomalies>, baseline: Option<&Baseline>, endurance: Option<&DeviceEndurance>, show_desc: bool, theme: &Theme) {
@@ -431,6 +445,15 @@ fn render_info(f: &mut Frame, area: Rect, device: &BlockDevice, filesystems: &[F
             }
             if let Some(temp) = smart.temperature {
                 lines.push(kv("Temperature", &format!("{}°C", temp), theme));
+            }
+            // Temperature trend sparkline (if we have history)
+            if !device.temp_history.is_empty() {
+                let (spark, t_min, t_max) = temp_sparkline(&device.temp_history, 20);
+                lines.push(Line::from(vec![
+                    Span::styled("  Temp trend   ", theme.text_dim),
+                    Span::styled(spark, theme.warn),
+                    Span::styled(format!("  min {}°C  max {}°C", t_min, t_max), theme.text_dim),
+                ]));
             }
             lines.push(Line::from(vec![]));
 

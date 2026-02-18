@@ -277,6 +277,14 @@ struct Cli {
     /// Grow the filesystem on DEVICE to fill its partition (resize2fs/xfs_growfs/btrfs resize)
     #[arg(long, value_name = "DEVICE")]
     growfs: Option<String>,
+
+    /// Start or check scrub status on DEVICE (btrfs/zfs/md-raid). Omit to check all.
+    #[arg(long, value_name = "DEVICE", num_args = 0..=1, default_missing_value = "ALL")]
+    scrub: Option<String>,
+
+    /// Print redundancy status: which devices are in RAID/ZFS, which are bare
+    #[arg(long)]
+    redundancy: bool,
 }
 
 fn main() -> Result<()> {
@@ -415,6 +423,13 @@ fn main() -> Result<()> {
     }
     if let Some(dev) = &cli.growfs {
         return run_growfs(dev);
+    }
+    if let Some(dev_or_all) = &cli.scrub {
+        let dev = if dev_or_all == "ALL" { None } else { Some(dev_or_all.as_str()) };
+        return run_scrub(dev);
+    }
+    if cli.redundancy {
+        return run_redundancy();
     }
     if cli.config {
         return run_print_config();
@@ -3640,6 +3655,205 @@ fn run_growfs(device: &str) -> Result<()> {
         println!("\nFilesystem grown successfully.");
     } else {
         anyhow::bail!("Grow command exited with status {}", status);
+    }
+    Ok(())
+}
+
+fn run_scrub(device: Option<&str>) -> Result<()> {
+    let mut found_any = false;
+
+    // ── ZFS pools ────────────────────────────────────────────────────
+    let zfs_out = std::process::Command::new("zpool")
+        .args(["status", "-v"])
+        .output();
+    if let Ok(out) = zfs_out {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut in_target = false;
+        let mut pool_name = String::new();
+        for line in text.lines() {
+            if line.trim_start().starts_with("pool:") {
+                pool_name = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                in_target = device.map_or(true, |d| pool_name == d || format!("/dev/{}", d) == pool_name);
+            }
+            if in_target && line.contains("scan:") {
+                found_any = true;
+                println!("ZFS pool '{}': {}", pool_name, line.split_once(':').map_or("", |(_, v)| v.trim()));
+            }
+        }
+    }
+
+    // ── BTRFS filesystems ────────────────────────────────────────────
+    let mounts_text = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let btrfs_mounts: Vec<(&str, &str)> = mounts_text.lines()
+        .filter_map(|l| {
+            let mut parts = l.split_whitespace();
+            let dev = parts.next()?;
+            let mp  = parts.next()?;
+            let fs  = parts.next()?;
+            if fs == "btrfs" { Some((dev, mp)) } else { None }
+        })
+        .collect();
+
+    // Deduplicate by mount point (btrfs can appear multiple times)
+    let mut seen_mp: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (dev, mp) in &btrfs_mounts {
+        if !seen_mp.insert(mp) { continue; }
+        let dev_name = dev.trim_start_matches("/dev/");
+        if device.map_or(false, |d| d != dev_name && d != *dev) { continue; }
+        found_any = true;
+
+        let status_out = std::process::Command::new("btrfs")
+            .args(["scrub", "status", mp])
+            .output();
+        match status_out {
+            Ok(o) => {
+                let text = String::from_utf8_lossy(&o.stdout);
+                let status_line = text.lines()
+                    .find(|l| l.contains("Status:") || l.contains("no scrub"))
+                    .map(|l| l.trim())
+                    .unwrap_or("no status");
+                println!("BTRFS {} ({}): {}", mp, dev, status_line);
+                // Start scrub if not running
+                if text.contains("no scrub") || text.contains("Status: finished") || text.contains("Status: aborted") {
+                    println!("  Starting btrfs scrub on {}…", mp);
+                    let _ = std::process::Command::new("btrfs")
+                        .args(["scrub", "start", mp])
+                        .status();
+                }
+            }
+            Err(_) => println!("  btrfs not installed or scrub not available."),
+        }
+    }
+
+    // ── MD-RAID ──────────────────────────────────────────────────────
+    let mdstat = std::fs::read_to_string("/proc/mdstat").unwrap_or_default();
+    for line in mdstat.lines() {
+        if !line.starts_with("md") { continue; }
+        let md_name = line.split_whitespace().next().unwrap_or("").to_string();
+        if device.map_or(false, |d| d != md_name && format!("/dev/{}", d) != format!("/dev/{}", md_name)) { continue; }
+        found_any = true;
+
+        // Read sync_action
+        let sync_path  = format!("/sys/block/{}/md/sync_action", md_name);
+        let mismatch_p = format!("/sys/block/{}/md/mismatch_cnt", md_name);
+        let sync_action = std::fs::read_to_string(&sync_path)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let mismatch = std::fs::read_to_string(&mismatch_p)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "0".to_string());
+
+        if sync_action == "idle" {
+            // Start a check
+            println!("MD-RAID /dev/{}: idle — starting check scrub…", md_name);
+            let _ = std::fs::write(&sync_path, "check");
+            println!("  Written 'check' to {}", sync_path);
+        } else {
+            println!("MD-RAID /dev/{}: sync_action={}, mismatch_cnt={}", md_name, sync_action, mismatch);
+        }
+    }
+
+    if !found_any {
+        if let Some(d) = device {
+            println!("No scrub-capable volume found matching '{}'.", d);
+            println!("Supported: ZFS pools, BTRFS filesystems, MD-RAID arrays (/dev/mdN).");
+        } else {
+            println!("No ZFS pools, BTRFS filesystems, or MD-RAID arrays detected.");
+        }
+    }
+    Ok(())
+}
+
+fn run_redundancy() -> Result<()> {
+    println!("{:<14}  {:<12}  {:<20}  {}", "Device", "Redundancy", "Array/Pool", "State");
+    println!("{}", "─".repeat(72));
+
+    // Collect all block devices from sysfs
+    let mut all_devs: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/sys/block") {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("zram") { continue; }
+            all_devs.push(name);
+        }
+    }
+    all_devs.sort();
+
+    // Build map: device → (array_name, level, state)
+    let mut raid_members: std::collections::HashMap<String, (String, String, String)> = std::collections::HashMap::new();
+
+    // MD-RAID
+    let mdstat = std::fs::read_to_string("/proc/mdstat").unwrap_or_default();
+    let mut current_md = String::new();
+    let mut current_level = String::new();
+    for line in mdstat.lines() {
+        if line.starts_with("md") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            current_md    = parts[0].to_string();
+            current_level = parts.get(3).copied().unwrap_or("?").to_string();
+        }
+        if line.trim_start().starts_with('[') { continue; }
+        // member devices appear as "sda[0]" etc.
+        for token in line.split_whitespace() {
+            if let Some(dev) = token.split('[').next() {
+                if all_devs.contains(&dev.to_string()) {
+                    let state_path = format!("/sys/block/{}/md/array_state", current_md);
+                    let state = std::fs::read_to_string(&state_path)
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|_| "?".to_string());
+                    raid_members.insert(dev.to_string(), (current_md.clone(), current_level.clone(), state));
+                }
+            }
+        }
+    }
+
+    // ZFS — use zpool status output
+    let zpool_out = std::process::Command::new("zpool").args(["status"]).output();
+    let mut current_pool = String::new();
+    let mut current_pool_state = String::new();
+    if let Ok(out) = zpool_out {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("pool:") {
+                current_pool = trimmed.split_whitespace().nth(1).unwrap_or("").to_string();
+            }
+            if trimmed.starts_with("state:") {
+                current_pool_state = trimmed.split_whitespace().nth(1).unwrap_or("").to_string();
+            }
+            // member device lines look like "  sda   ONLINE  ..."
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 2 && all_devs.contains(&parts[0].to_string()) {
+                raid_members.insert(parts[0].to_string(),
+                    (current_pool.clone(), "zfs".to_string(), current_pool_state.clone()));
+            }
+        }
+    }
+
+    for dev in &all_devs {
+        let (redundancy, array, state) = if let Some((arr, level, st)) = raid_members.get(dev) {
+            let red = match level.as_str() {
+                "raid1" | "mirror" => "MIRRORED",
+                "raid5"            => "RAID-5",
+                "raid6"            => "RAID-6",
+                "raid10"           => "RAID-10",
+                "zfs"              => "ZFS",
+                "raid0"            => "RAID-0 (none)",
+                _                  => "RAID",
+            };
+            (red.to_string(), arr.clone(), st.clone())
+        } else {
+            ("NONE".to_string(), "—".to_string(), "bare".to_string())
+        };
+
+        let state_display = match state.as_str() {
+            "clean" | "ONLINE" | "active" => format!("✓ {}", state),
+            "degraded" | "DEGRADED"       => format!("⚠ {}", state),
+            "failed"   | "FAULTED"        => format!("✗ {}", state),
+            _                             => state.clone(),
+        };
+
+        println!("{:<14}  {:<12}  {:<20}  {}", dev, redundancy, array, state_display);
     }
     Ok(())
 }

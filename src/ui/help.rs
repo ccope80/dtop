@@ -126,6 +126,8 @@ pub fn render(f: &mut Frame, theme: &Theme, scroll: usize) {
         key_line(theme, "  --disk-temps",        "All device temperatures (cache)"),
         key_line(theme, "  --disk-model [DEV]", "Model/serial/firmware inventory"),
         key_line(theme, "  --growfs DEV",       "Grow FS to fill partition/LV"),
+        key_line(theme, "  --scrub [DEV]",     "Start/check BTRFS/ZFS/MD scrub"),
+        key_line(theme, "  --redundancy",      "RAID/ZFS redundancy status table"),
         key_line(theme, "  --print-service",     "Print systemd unit for daemon"),
         key_line(theme, "  --test-webhook",      "Send test webhook notification"),
         key_line(theme, "  --edit-config",       "Open config in $EDITOR"),
